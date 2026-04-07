@@ -1,0 +1,1997 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LLaVA-1.5 阅读报告</title>
+  <style>
+    :root {
+      --fg: #1f2937;
+      --muted: #5b6472;
+      --accent: #17324d;
+      --border: #d8dee6;
+      --bg: #fbfcfd;
+      --codebg: #f4f6f8;
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: "Noto Serif CJK SC", "Source Han Serif SC", "PingFang SC", "Microsoft YaHei", serif;
+      line-height: 1.8;
+    }
+    main {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 32px 24px 64px;
+    }
+    h1, h2, h3 {
+      color: var(--accent);
+      line-height: 1.4;
+    }
+    h1 { font-size: 2.1rem; margin-top: 0; }
+    h2 { margin-top: 2.2rem; border-top: 1px solid var(--border); padding-top: 1.4rem; }
+    img {
+      display: block;
+      max-width: 100%;
+      height: auto;
+      margin: 1rem auto 0.4rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: white;
+    }
+    p, li { font-size: 1rem; }
+    code {
+      background: var(--codebg);
+      padding: 0.12rem 0.32rem;
+      border-radius: 4px;
+      font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+      font-size: 0.92em;
+    }
+    pre {
+      background: var(--codebg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      overflow-x: auto;
+    }
+    pre code { background: transparent; padding: 0; }
+    .diagram-wrap {
+      margin: 1rem 0 1.25rem;
+      padding: 12px;
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .diagram-caption {
+      margin: 0.4rem 0 0;
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>LLaVA-1.5 论文精读报告</h1>
+<p>论文题目：<strong>Improved Baselines with Visual Instruction Tuning</strong></p>
+<p>论文版本：<code>arXiv:2310.03744v2</code>，页面首页显示日期为 <code>2024-05-15</code></p>
+<p>阅读对象：LLaVA-1.5 论文与附录，重点关注其<strong>相对原始 LLaVA 的改进、方法原理、数据流转、数据处理、数据格式、训练流程与局限性</strong></p>
+<p>说明：本报告以三类信息为基础组织内容。</p>
+<ul>
+<li><strong>论文明确说明</strong>：来自论文正文、附录、图表。</li>
+<li><strong>官方实现/README 补充</strong>：来自官方 <code>LLaVA</code> 仓库公开脚本与文档，用来帮助解释训练接口和数据格式。</li>
+<li><strong>合理推断</strong>：论文没有逐字段写出的实现细节，我会明确标注，不把推断写成事实。</li>
+</ul>
+<h2>1. 一页结论</h2>
+<p>如果只保留一句话，我会这样概括这篇论文：<strong>LLaVA-1.5 的关键价值，不是发明了一个全新的多模态结构，而是在 LLaVA 框架内用非常“小而有效”的改动，把“自然视觉对话”和“学术型 VQA/OCR/区域理解”更好地统一起来。</strong></p>
+<p>论文最核心的结论有五点：</p>
+<ul>
+<li>原始 LLaVA 的全连接视觉-语言连接器并不弱，问题主要不在“必须换成复杂 resampler 才能强”，而在<strong>数据和训练配方</strong>。</li>
+<li>相比原始 LLaVA，LLaVA-1.5 的关键增强包括：<code>CLIP-ViT-L-336px</code>、<code>2-layer MLP projector</code>、学术任务导向数据混合、<code>response formatting prompts</code>。</li>
+<li>这些改动叠加后，模型在 <code>VQAv2 / GQA / TextVQA / MME / MMBench / MM-Vet</code> 等多个 benchmark 上都有明显提升。</li>
+<li>论文还进一步探索了 <code>LLaVA-1.5-HD</code>：通过<strong>切网格编码 + 全局低分辨率上下文</strong>来支持更高输入分辨率，并报告了更好的细节感知和更低幻觉。</li>
+<li>它的重要“创新性”更接近<strong>系统化 recipe innovation</strong>，而不是单点结构发明：即在公开数据、有限算力、简单结构下，给出一套高可复现、强性能的训练方案。</li>
+</ul>
+<p>从“和原始 LLaVA 比较”的角度看，LLaVA-1.5 最重要的不是把模型复杂化，而是把下列几个问题处理得更干净：</p>
+<ul>
+<li>原始 LLaVA 偏向长回答和自然聊天，对短答案、选项题、OCR 型任务不够友好。</li>
+<li>原始 LLaVA 没有系统处理“回答格式控制”，因此容易在需要单词、短语、选项字母时输出冗长自然语言。</li>
+<li>原始 LLaVA 的训练数据侧重 <code>LLaVA-Instruct-158K</code>，而 1.5 显式引入了 VQA/OCR/区域级数据和 ShareGPT 文本对话。</li>
+<li>原始 LLaVA 的视觉输入分辨率更低，而 1.5 与 1.5-HD 明确把“看清细节”作为可扩展方向。</li>
+</ul>
+<h2>2. 论文定位与整体图景</h2>
+<p>论文标题中的 <code>Improved Baselines</code> 非常关键。作者并没有把这篇工作包装成“彻底替代旧范式的新框架”，而是明确地把它定义为：<strong>在 LLaVA 框架内做受控实验，系统研究 LMM 设计选择，并建立更强、更可复现的 baseline。</strong></p>
+<p><img alt="图 1 论文 Figure 1：LLaVA-1.5 的总体结果与效率概览" src="assets/figure1_overview.png"></p>
+<p>从 Figure 1 可以直接读出作者想强调的三件事：</p>
+<ul>
+<li>它在 11 个任务上达到或接近当时 SoTA。</li>
+<li>它的训练样本规模比一些强基线小很多。</li>
+<li>它的结构变化其实很有限，主要是 <code>MLP connector + academic-task-oriented data + response formatting</code>。</li>
+</ul>
+<p>因此，这篇论文真正回答的问题可以写成：</p>
+<ul>
+<li><strong>问题 1</strong>：原始 LLaVA 为什么擅长自然视觉对话，却不擅长很多 academic benchmarks？</li>
+<li><strong>问题 2</strong>：是不是必须引入更复杂的 <code>Q-Former / resampler / 大规模额外预训练</code> 才能提升？</li>
+<li><strong>问题 3</strong>：如果不大改架构，只改数据、输出提示和少量连接层，能不能得到更强、更通用的多模态助手？</li>
+</ul>
+<p>作者的回答总体是肯定的。</p>
+<h2>3. 相比原始 LLaVA，LLaVA-1.5 到底改了什么</h2>
+<p>为了避免把改动说散，先给一个压缩版对比。</p>
+<ul>
+<li>
+<p><strong>视觉编码器</strong>
+  原始 LLaVA：核心版本通常围绕 <code>CLIP ViT-L/14</code>。
+  LLaVA-1.5：换成 <code>openai/clip-vit-large-patch14-336</code>，把输入从更低分辨率提升到 <code>336 x 336</code>。</p>
+</li>
+<li>
+<p><strong>视觉到语言的连接器</strong>
+  原始 LLaVA：单层线性投影。
+  LLaVA-1.5：<code>mlp2x_gelu</code>，也就是两层 MLP，中间带 <code>GELU</code>。</p>
+</li>
+<li>
+<p><strong>指令微调数据</strong>
+  原始 LLaVA：核心是 <code>LLaVA-Instruct-158K</code>。
+  LLaVA-1.5：扩展成 <code>665K</code> 的多源混合数据，加入 <code>VQAv2 / GQA / OKVQA / A-OKVQA / OCRVQA / TextCaps / RefCOCO / Visual Genome / ShareGPT</code>。</p>
+</li>
+<li>
+<p><strong>回答形式控制</strong>
+  原始 LLaVA：没有系统化的“短答案格式提示”机制。
+  LLaVA-1.5：为不同数据集和评测集加入明确的 <code>response formatting prompt</code>。</p>
+</li>
+<li>
+<p><strong>输入分辨率扩展</strong>
+  原始 LLaVA：没有本文这种系统化的高分辨率扩展分析。
+  LLaVA-1.5-HD：用“切网格编码 + 合并 + 全局上下文”的方式支持更高分辨率输入。</p>
+</li>
+<li>
+<p><strong>能力侧重点</strong>
+  原始 LLaVA：更像一个会聊天、会描述图像的视觉助手。
+  LLaVA-1.5：在尽量保留视觉聊天能力的同时，显著补齐学术型 VQA、OCR、多选题、区域理解。</p>
+</li>
+</ul>
+<p>我认为这篇论文最值得注意的一点是：<strong>这些改动不是彼此孤立的。</strong></p>
+<ul>
+<li><code>VQA</code> 数据本身能提升短答案任务。</li>
+<li>但如果不加 <code>format prompt</code>，模型容易学偏输出风格。</li>
+<li>只改数据还不够，<code>MLP projector</code> 进一步提升跨模态表示能力。</li>
+<li>当模型要看 OCR 或细粒度区域时，<code>336</code> 分辨率和后续 <code>HD</code> 扩展就变得重要。</li>
+<li><code>ShareGPT</code> 文本对话则帮助模型保留更好的自然语言行为、多语种适应能力和写作能力。</li>
+</ul>
+<h2>4. 论文认为原始 LLaVA 的主要短板是什么</h2>
+<p>作者在第 3 节对比了 LLaVA 与 InstructBLIP。这个对比的重点不是“谁绝对更好”，而是二者代表了两种不同偏向：</p>
+<ul>
+<li>原始 <code>LLaVA</code> 更强于真实视觉对话与长回答风格。</li>
+<li><code>InstructBLIP</code> 更强于很多学术型 VQA benchmark，但可能在自然对话上过拟合短答案。</li>
+</ul>
+<p>论文认为，原始 LLaVA 的核心短板是：</p>
+<ul>
+<li>它对很多 academic benchmark 所要求的<strong>短格式答案</strong>适配不足。</li>
+<li>对 <code>yes/no</code> 类型问题，容易出现回答分布偏置。</li>
+<li>训练分布里缺少足够多的 <code>OCR / multiple-choice / short-answer / region-level</code> 数据。</li>
+</ul>
+<p><img alt="图 2 论文 Table 1：不同 prompt 对输出格式控制的影响" src="assets/table1_prompting_example.jpg"></p>
+<p>这张图很重要。作者并不是简单地说“加 VQA 数据就会更强”，而是指出了一个更细的根因：</p>
+<ul>
+<li>如果训练提示只是模糊地写成 <code>Q: ... A: ...</code>，模型并不知道你到底想要一句自然回答，还是一个单词、短语、选项字母。</li>
+<li>一旦训练中短答案样本变多，但提示不清晰，模型就可能把“短答倾向”扩散到不该短答的场景。</li>
+<li>所以，问题不只是“训练什么数据”，还包括“怎样把期望输出格式显式写进 prompt”。</li>
+</ul>
+<p>这就是 <code>response format prompting</code> 的出发点。</p>
+<h2>5. 方法总览：LLaVA-1.5 的核心思路</h2>
+<p>LLaVA-1.5 的方法可以压缩成一句话：</p>
+<p><strong>保留 LLaVA 的简单主干，把视觉 token 更稳地映射到 LLM 空间，再用更合理的数据混合和格式提示，让模型同时学会自然对话、短答案 VQA、OCR、多选题和区域理解。</strong></p>
+<p>从设计维度看，它主要沿着三条线改进：</p>
+<ul>
+<li><strong>模型线</strong>：线性 projector 改成 <code>2-layer MLP</code>。</li>
+<li><strong>输入线</strong>：视觉编码器升到 <code>CLIP-ViT-L-336px</code>，后续再扩展到 <code>HD</code>。</li>
+<li><strong>数据线</strong>：从 <code>LLaVA-Instruct-158K</code> 扩展到 <code>665K</code> 指令混合数据，并为不同任务加入显式格式提示。</li>
+</ul>
+<div class="diagram-wrap">
+  <svg viewBox="0 0 980 340" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="LLaVA-1.5 pipeline diagram">
+    <style>
+      .box { fill: #e8f1fa; stroke: #355070; stroke-width: 2; rx: 14; ry: 14; }
+      .txt { font: 18px sans-serif; fill: #1f2d3d; text-anchor: middle; }
+      .sub { font: 16px sans-serif; fill: #40566b; text-anchor: middle; }
+      .title { font: 700 24px sans-serif; fill: #17324d; text-anchor: middle; }
+      .arrow { stroke: #355070; stroke-width: 2.5; fill: none; marker-end: url(#m); }
+    </style>
+    <defs>
+      <marker id="m" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+        <path d="M0,0 L9,3 L0,6 Z" fill="#355070"/>
+      </marker>
+    </defs>
+    <text x="490" y="32" class="title">LLaVA-1.5 Training / Data Flow</text>
+    <rect class="box" x="20" y="70" width="180" height="64" fill="#dbe7c9"/>
+    <rect class="box" x="250" y="70" width="150" height="64" fill="#d9eaf7"/>
+    <rect class="box" x="450" y="70" width="160" height="64" fill="#f8e6b8"/>
+    <rect class="box" x="660" y="70" width="160" height="64" fill="#f7d9d9"/>
+    <text x="110" y="98" class="txt">558K</text><text x="110" y="120" class="txt">Image-Text Pairs</text>
+    <text x="325" y="98" class="txt">CLIP ViT-L/14</text><text x="325" y="120" class="txt">336px</text>
+    <text x="530" y="98" class="txt">MLP Projector</text><text x="530" y="120" class="txt">mlp2x_gelu</text>
+    <text x="740" y="98" class="txt">Vicuna v1.5</text><text x="740" y="120" class="txt">7B / 13B</text>
+    <line class="arrow" x1="200" y1="102" x2="250" y2="102"/>
+    <line class="arrow" x1="400" y1="102" x2="450" y2="102"/>
+    <line class="arrow" x1="610" y1="102" x2="660" y2="102"/>
+
+    <rect class="box" x="20" y="180" width="220" height="78" fill="#ece8f6"/>
+    <rect class="box" x="290" y="180" width="180" height="78" fill="#eaf4e2"/>
+    <rect class="box" x="520" y="180" width="180" height="78" fill="#e6f5f1"/>
+    <rect class="box" x="750" y="180" width="180" height="78" fill="#fde7dd"/>
+    <text x="130" y="208" class="txt">665K Instruct Mix</text><text x="130" y="230" class="txt">LLaVA / VQA / OCR /</text><text x="130" y="252" class="txt">Region / ShareGPT</text>
+    <text x="380" y="218" class="txt">Response Format</text><text x="380" y="240" class="txt">Prompts</text>
+    <text x="610" y="218" class="txt">Conversation JSON</text><text x="610" y="240" class="txt">image + conversations</text>
+    <text x="840" y="218" class="txt">Visual Instruction</text><text x="840" y="240" class="txt">Tuning</text>
+    <line class="arrow" x1="240" y1="219" x2="290" y2="219"/>
+    <line class="arrow" x1="470" y1="219" x2="520" y2="219"/>
+    <line class="arrow" x1="700" y1="219" x2="750" y2="219"/>
+    <line x1="530" y1="134" x2="530" y2="178" stroke="#355070" stroke-width="2"/>
+    <text x="490" y="162" class="sub">Stage 1: alignment pretraining</text>
+    <text x="490" y="292" class="sub">Stage 2: instruction tuning with explicit output-format control</text>
+  </svg>
+  <p class="diagram-caption">图 3 根据论文、附录与官方训练脚本整理的 LLaVA-1.5 数据流与训练流程示意图。</p>
+</div>
+
+<h3>5.1 模型架构图：按真实实现展开数据流</h3>
+<p>上面这张图更偏“训练阶段和数据来源”。如果要看单条样本在模型内部到底怎么流转，更合适的是下面这张架构图：</p>
+<div class="diagram-wrap">
+  <svg viewBox="0 0 1180 560" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="LLaVA-1.5 architecture and tensor flow">
+    <style>
+      .box { stroke: #355070; stroke-width: 2; rx: 14; ry: 14; }
+      .txt { font: 17px sans-serif; fill: #1f2d3d; text-anchor: middle; }
+      .small { font: 14px sans-serif; fill: #1f2d3d; text-anchor: middle; }
+      .hint { font: 14px sans-serif; fill: #5a6472; text-anchor: middle; }
+      .accent { font: 700 16px sans-serif; fill: #7a2e2e; text-anchor: middle; }
+      .title { font: 700 24px sans-serif; fill: #17324d; text-anchor: middle; }
+      .arrow { stroke: #355070; stroke-width: 2.5; fill: none; marker-end: url(#m2); }
+    </style>
+    <defs>
+      <marker id="m2" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+        <path d="M0,0 L9,3 L0,6 Z" fill="#355070"/>
+      </marker>
+    </defs>
+    <text x="590" y="34" class="title">LLaVA-1.5 Model Architecture / Single-Sample Data Flow</text>
+
+    <rect class="box" x="20" y="180" width="170" height="92" fill="#eef2ff"/>
+    <text x="105" y="215" class="txt">Raw Sample</text>
+    <text x="105" y="243" class="txt">image path +</text>
+    <text x="105" y="271" class="txt">conversations</text>
+
+    <rect class="box" x="245" y="80" width="210" height="92" fill="#e7f5ef"/>
+    <text x="350" y="112" class="txt">Text Branch</text>
+    <text x="350" y="140" class="small">preprocess_multimodal</text>
+    <text x="350" y="164" class="small">move &lt;image&gt; to front</text>
+
+    <rect class="box" x="500" y="80" width="220" height="92" fill="#ddf4ea"/>
+    <text x="610" y="108" class="small">Conversation Template +</text>
+    <text x="610" y="136" class="small">tokenizer_image_token</text>
+    <text x="610" y="164" class="small">input_ids [1, T]</text>
+
+    <rect class="box" x="245" y="300" width="210" height="92" fill="#e9f1fb"/>
+    <text x="350" y="330" class="txt">Image Branch</text>
+    <text x="350" y="358" class="small">load PIL + pad/resize</text>
+    <text x="350" y="382" class="small">normalize</text>
+
+    <rect class="box" x="500" y="300" width="220" height="92" fill="#d9eaf7"/>
+    <text x="610" y="328" class="small">CLIP ViT-L/14-336</text>
+    <text x="610" y="356" class="small">select_layer=-2</text>
+    <text x="610" y="380" class="small">patch feats [1, 576, 1024]</text>
+
+    <rect class="box" x="765" y="300" width="190" height="92" fill="#f8e6b8"/>
+    <text x="860" y="328" class="small">MLP Projector</text>
+    <text x="860" y="356" class="small">Linear -&gt; GELU -&gt; Linear</text>
+    <text x="860" y="380" class="small">[1, 576, 5120] (13B)</text>
+
+    <rect class="box" x="765" y="98" width="215" height="136" fill="#fde7dd"/>
+    <text x="872" y="128" class="small">Fusion in</text>
+    <text x="872" y="152" class="small">prepare_inputs_labels_for_multimodal</text>
+    <text x="872" y="180" class="small">embed text + replace</text>
+    <text x="872" y="204" class="small">IMAGE_TOKEN_INDEX</text>
+    <text x="872" y="228" class="small">new_input_embeds [1, S, 5120]</text>
+
+    <rect class="box" x="20" y="432" width="435" height="64" fill="#f4f0ff"/>
+    <text x="238" y="458" class="small">HD / anyres note: select_best_resolution -&gt; tile -&gt; optional unpad/newline -&gt; concat local + global tokens</text>
+
+    <rect class="box" x="765" y="432" width="215" height="64" fill="#fff1db"/>
+    <text x="872" y="458" class="small">Mask Rule</text>
+    <text x="872" y="482" class="small">system / user / image tokens = -100</text>
+
+    <rect class="box" x="1015" y="98" width="145" height="136" fill="#f7d9d9"/>
+    <text x="1088" y="132" class="small">Vicuna / LLaMA</text>
+    <text x="1088" y="160" class="small">Decoder Blocks</text>
+    <text x="1088" y="188" class="small">x40 for 13B</text>
+    <text x="1088" y="212" class="small">x32 for 7B</text>
+
+    <rect class="box" x="1015" y="268" width="145" height="92" fill="#ece8f6"/>
+    <text x="1088" y="304" class="small">LM Head</text>
+    <text x="1088" y="332" class="small">logits</text>
+    <text x="1088" y="356" class="small">[1, S, V]</text>
+
+    <rect class="box" x="1015" y="392" width="145" height="104" fill="#eaf4e2"/>
+    <text x="1088" y="428" class="small">Causal LM Loss</text>
+    <text x="1088" y="456" class="small">assistant</text>
+    <text x="1088" y="480" class="small">response only</text>
+
+    <line class="arrow" x1="190" y1="226" x2="245" y2="126"/>
+    <line class="arrow" x1="190" y1="226" x2="245" y2="346"/>
+    <line class="arrow" x1="455" y1="126" x2="500" y2="126"/>
+    <line class="arrow" x1="455" y1="346" x2="500" y2="346"/>
+    <line class="arrow" x1="720" y1="346" x2="765" y2="346"/>
+    <line class="arrow" x1="720" y1="126" x2="765" y2="166"/>
+    <line class="arrow" x1="860" y1="300" x2="860" y2="234"/>
+    <line class="arrow" x1="980" y1="166" x2="1015" y2="166"/>
+    <line class="arrow" x1="1088" y1="234" x2="1088" y2="268"/>
+    <line class="arrow" x1="1088" y1="360" x2="1088" y2="392"/>
+
+    <line x1="455" y1="464" x2="860" y2="464" stroke="#7b61aa" stroke-width="2"/>
+    <line x1="860" y1="464" x2="860" y2="392" stroke="#7b61aa" stroke-width="2"/>
+    <text x="650" y="452" class="hint">optional high-resolution branch</text>
+
+    <line x1="980" y1="464" x2="930" y2="464" stroke="#a46d1f" stroke-width="2"/>
+    <line x1="930" y1="464" x2="930" y2="234" stroke="#a46d1f" stroke-width="2"/>
+    <text x="950" y="452" class="hint">mask is attached here</text>
+
+    <text x="872" y="80" class="accent">S = T - 1 + N_v</text>
+    <text x="872" y="58" class="hint">base 336: N_v = 576</text>
+  </svg>
+  <p class="diagram-caption">图 4 根据官方实现整理的 LLaVA-1.5 单样本模型架构与张量流转示意图。</p>
+</div>
+
+<p>这张图有三个阅读重点：</p>
+<ul>
+<li>左侧的 <code>Raw Sample</code> 不是张量，而是磁盘路径和 <code>conversation JSON</code>。</li>
+<li>中间分成文本支路和图像支路，二者直到 <code>prepare_inputs_labels_for_multimodal()</code> 才真正汇合。</li>
+<li>右侧的 loss 不是对整条序列所有 token 统一计算，而是只对 assistant 输出位置计算；<code>system / user / image tokens</code> 会被设成 <code>IGNORE_INDEX=-100</code>。</li>
+</ul>
+<p>这也是为什么只看 <code>tokenizer</code> 层会误以为“图像只占一个 token”，而真正进入 LLM 时，那个单独的 <code>&lt;image&gt;</code> 占位已经被整段视觉 embedding 替换掉了。</p>
+<h3>5.2 类 PyTorch <code>summary</code>：基础版 <code>LLaVA-1.5-13B</code></h3>
+<p>下面这段不是运行 <code>torchinfo</code> 直接导出的日志，而是根据官方实现整理的“结构摘要版 summary”。它更适合用来理解模块边界和张量形状。</p>
+<pre><code class="language-text">Model Summary (LLaVA-1.5-13B, base 336, single image, one &lt;image&gt; placeholder)
+================================================================================
+Input Sample
+  image_path / conversations                  Python dict / list[dict]
+
+Text Branch
+  preprocess_multimodal                       normalize &lt;image&gt; position
+  conversation template                       list[dict] -&gt; prompt string
+  tokenizer_image_token                       prompt -&gt; input_ids [1, T]
+
+Image Branch
+  CLIPImageProcessor                          PIL -&gt; pixel_values [1, 3, 336, 336]
+  CLIPVisionTower(select_layer=-2, patch)     [1, 3, 336, 336] -&gt; [1, 576, 1024]
+  mm_projector = Linear(1024,5120)
+               -&gt; GELU
+               -&gt; Linear(5120,5120)           [1, 576, 1024] -&gt; [1, 576, 5120]
+
+Fusion
+  embed_tokens                                [1, T] -&gt; [1, T, 5120]
+  prepare_inputs_labels_for_multimodal        replace 1 IMAGE_TOKEN_INDEX with
+                                              576 visual embeddings
+                                              [1, T, 5120] -&gt; [1, S, 5120]
+                                              S = T - 1 + 576
+
+Decoder / Prediction
+  Vicuna / LLaMA decoder blocks x40           [1, S, 5120] -&gt; [1, S, 5120]
+  lm_head                                     [1, S, 5120] -&gt; [1, S, vocab_size]
+
+Supervision
+  labels                                      [1, S]
+  system / user / image tokens                -100 (IGNORE_INDEX)
+  assistant response tokens                   keep target ids
+  causal LM loss                              scalar
+================================================================================
+7B variant note:
+  hidden size changes from 5120 to 4096; decoder depth changes from x40 to x32.
+</code></pre>
+<p>这个 summary 最关键的不是记住每一个数字，而是记住三条关系：</p>
+<ul>
+<li>视觉塔输出维度是 <code>1024</code>，先在 projector 里变成和 LLM 一样的 hidden size。</li>
+<li>文本里的 <code>&lt;image&gt;</code> 在 tokenizer 阶段只占 <code>1</code> 个逻辑占位，但在融合阶段会被 <code>576</code> 个视觉 embedding 替换。</li>
+<li>loss 是在融合之后的整条新序列上算的，但真正参与监督的只有 assistant 文本位置。</li>
+</ul>
+<h3>5.3 如果是 <code>HD / anyres</code> 路径，summary 哪些地方会变</h3>
+<p>基础版 <code>336</code> 路径里，最稳定的视觉 token 数是 <code>576</code>。但高分辨率路径不是固定 <code>576</code>，而是变成：</p>
+<pre><code class="language-text">N_v = global tokens + local tiled tokens + optional row-end / newline tokens
+S   = T - 1 + N_v
+</code></pre>
+<p>以论文里常见的 <code>3 x 2</code> tile 例子说明：</p>
+<pre><code class="language-text">global view                                  -&gt; 256 tokens
+6 local tiles                                -&gt; 6 x 256 = 1536 tokens
+row-end tokens                               -&gt; 32 tokens
+estimated visual token count                 -&gt; about 1824 tokens
+fused sequence length                        -&gt; S = T - 1 + 1824
+</code></pre>
+<p>这也是 <code>HD</code> 版本更擅长细粒度阅读的直接原因之一，因为它送进 LLM 的视觉 token 明显更多；代价则是显存、序列长度和推理开销都会进一步上升。</p>
+<p>这套方案的一个现实优点是：它并没有引入像 <code>Q-Former</code> 那样新的大型子网络，也没有要求百亿级图文额外预训练数据。论文给出的结论是：<strong>在公开数据和可承受算力下，简单结构依然可以做得很强。</strong></p>
+<h2>6. 按数据流转理解 LLaVA-1.5：从原始样本到最终回答</h2>
+<p>这一版我不再把模型拆成“视觉塔、projector、LLM”三块孤立讲，而是按真实数据流转顺序来解释。因为从实现角度看，LLaVA-1.5 的关键不只是模块本身，而是<strong>样本怎样进入系统、怎样被改写、怎样变成张量、怎样和视觉特征拼接、怎样被监督</strong>。</p>
+<h3>6.1 先给出总流程</h3>
+<p>把一条训练样本送进 LLaVA-1.5，大致会经过下面这条链：</p>
+<pre><code class="language-text">JSON sample
+-&gt; 读取 image / conversations
+-&gt; 把 &lt;image&gt; 规范化到用户轮开头
+-&gt; 用 conversation template 拼成完整 prompt
+-&gt; tokenizer 把 &lt;image&gt; 替换成一个特殊 image token 占位
+-&gt; 图像做 pad / resize / normalize
+-&gt; CLIP 产出 patch tokens
+-&gt; MLP projector 映射到 LLM hidden space
+-&gt; 用真实视觉 embedding 替换文本里的 image token 占位
+-&gt; human 部分 label 置为 IGNORE_INDEX
+-&gt; 只对 assistant 输出 token 计算 causal LM loss
+</code></pre>
+<p>这条链里最容易被忽略、但又最重要的三件事是：</p>
+<ul>
+<li>基础版 <code>v1_5</code> 脚本里，文本侧并不会显式塞进 <code>576</code> 个 <code>&lt;im_patch&gt;</code> token。</li>
+<li>真正的“视觉 token 展开”发生在模型前向内部，而不是 JSON 或 tokenizer 阶段。</li>
+<li>短答、多选、OCR 的行为改进，很大程度来自<strong>prompt 组织和 label 监督方式</strong>，而不只是 projector 改了 MLP。</li>
+</ul>
+<h3>6.2 输入样本先长什么样</h3>
+<p>LLaVA-1.5 训练有两个阶段，对应两种样本组织方式。</p>
+<h4>A. 阶段 1：alignment pretraining 样本</h4>
+<p>官方 <code>scripts/v1_5/pretrain.sh</code> 使用：</p>
+<ul>
+<li><code>--version plain</code></li>
+<li><code>--data_path ./playground/data/LLaVA-Pretrain/blip_laion_cc_sbu_558k.json</code></li>
+</ul>
+<p>从 <code>train.py</code> 的 <code>preprocess_plain()</code> 可以看出，这一阶段假设样本是两轮结构：</p>
+<ul>
+<li>第一轮：human，内容中带 <code>&lt;image&gt;</code></li>
+<li>第二轮：gpt，内容是图像对应文本</li>
+</ul>
+<p>教学化地写，样本可以理解成：</p>
+<pre><code class="language-json">{
+  &quot;id&quot;: &quot;pretrain-0001&quot;,
+  &quot;image&quot;: &quot;LLaVA-Pretrain/images/000123.jpg&quot;,
+  &quot;conversations&quot;: [
+    {
+      &quot;from&quot;: &quot;human&quot;,
+      &quot;value&quot;: &quot;&lt;image&gt;&quot;
+    },
+    {
+      &quot;from&quot;: &quot;gpt&quot;,
+      &quot;value&quot;: &quot;A yellow bus driving down a city street.&quot;
+    }
+  ]
+}
+</code></pre>
+<p><code>preprocess_plain()</code> 里有一个非常直接的逻辑：</p>
+<ul>
+<li>把第一轮 human 文本强制写成只有 <code>&lt;image&gt;</code></li>
+<li>然后拼成：</li>
+</ul>
+<pre><code class="language-text">&lt;image&gt;A yellow bus driving down a city street.\n
+</code></pre>
+<p>也就是说，第一阶段本质上不是“多轮助手对话”，而是<strong>图像条件语言建模</strong>。</p>
+<h4>B. 阶段 2：visual instruction tuning 样本</h4>
+<p>官方 <code>scripts/v1_5/finetune.sh</code> 使用：</p>
+<ul>
+<li><code>--version v1</code></li>
+<li><code>--data_path ./playground/data/llava_v1_5_mix665k.json</code></li>
+</ul>
+<p>官方 <code>Finetune_Custom_Data.md</code> 给出的 released 格式是：</p>
+<pre><code class="language-json">{
+  &quot;id&quot;: &quot;sample-1001&quot;,
+  &quot;image&quot;: &quot;coco/train2017/000000123456.jpg&quot;,
+  &quot;conversations&quot;: [
+    {
+      &quot;from&quot;: &quot;human&quot;,
+      &quot;value&quot;: &quot;&lt;image&gt;\nWhat color is the bus? Answer the question using a single word or phrase.&quot;
+    },
+    {
+      &quot;from&quot;: &quot;gpt&quot;,
+      &quot;value&quot;: &quot;Yellow.&quot;
+    }
+  ]
+}
+</code></pre>
+<p>这里的关键字段只有三个：</p>
+<ul>
+<li>
+<p><code>id</code>
+  唯一样本标识。</p>
+</li>
+<li>
+<p><code>image</code>
+  图像相对路径，不是二进制图像内容本身。</p>
+</li>
+<li>
+<p><code>conversations</code>
+  多轮对话序列。<code>human</code> 是输入轮，<code>gpt</code> 是监督目标轮。</p>
+</li>
+</ul>
+<p>如果没有图像，例如 <code>ShareGPT</code> 文本对话样本，那么 <code>image</code> 字段可以不存在。训练代码在这种情况下仍允许这条样本进入同一个 dataloader，只是会走 text-only 分支。</p>
+<h3>6.3 不同任务的数据目标格式，到底长什么样</h3>
+<p>这一步是你特别要求补充清楚的地方。论文 Table 7 给了任务混合和格式提示，但没有把真实 JSON 全部打印出来。我这里按<strong>目标格式</strong>分类解释。</p>
+<h4>A. 短答案 VQA</h4>
+<p>目标：让模型输出单词或短语，而不是长段自然语言。</p>
+<p>典型 prompt：</p>
+<pre><code class="language-json">{
+  &quot;from&quot;: &quot;human&quot;,
+  &quot;value&quot;: &quot;&lt;image&gt;\nWhat animal is visible in the center? Answer the question using a single word or phrase.&quot;
+}
+</code></pre>
+<p>典型 target：</p>
+<pre><code class="language-json">{
+  &quot;from&quot;: &quot;gpt&quot;,
+  &quot;value&quot;: &quot;Dog.&quot;
+}
+</code></pre>
+<p>适用数据：</p>
+<ul>
+<li><code>VQAv2</code></li>
+<li><code>GQA</code></li>
+<li><code>OKVQA</code></li>
+<li><code>OCRVQA</code></li>
+</ul>
+<h4>B. 多选题</h4>
+<p>目标：只输出选项字母，而不是复述整句。</p>
+<p>典型 prompt：</p>
+<pre><code class="language-json">{
+  &quot;from&quot;: &quot;human&quot;,
+  &quot;value&quot;: &quot;&lt;image&gt;\nWhich option best describes the scene? (A) beach (B) airport (C) forest (D) kitchen. Answer with the option’s letter from the given choices directly.&quot;
+}
+</code></pre>
+<p>典型 target：</p>
+<pre><code class="language-json">{
+  &quot;from&quot;: &quot;gpt&quot;,
+  &quot;value&quot;: &quot;A&quot;
+}
+</code></pre>
+<p>适用数据：</p>
+<ul>
+<li><code>A-OKVQA</code></li>
+<li><code>ScienceQA</code></li>
+<li><code>MMBench</code></li>
+<li><code>SEED-Bench</code></li>
+</ul>
+<h4>C. 一句话 caption</h4>
+<p>目标：明确要求一句话，不要输出多句详细描述。</p>
+<p>典型 prompt：</p>
+<pre><code class="language-json">{
+  &quot;from&quot;: &quot;human&quot;,
+  &quot;value&quot;: &quot;&lt;image&gt;\nProvide a one-sentence caption for the provided image.&quot;
+}
+</code></pre>
+<p>典型 target：</p>
+<pre><code class="language-json">{
+  &quot;from&quot;: &quot;gpt&quot;,
+  &quot;value&quot;: &quot;A man in a red jacket is riding a bicycle on a city street.&quot;
+}
+</code></pre>
+<p>适用数据：</p>
+<ul>
+<li><code>TextCaps</code></li>
+</ul>
+<h4>D. 区域级描述或坐标输出</h4>
+<p>目标：让模型在“描述某区域”和“返回某区域坐标”之间切换。</p>
+<p>论文对 <code>RefCOCO</code> 的说明是：</p>
+<ul>
+<li>随机用两种格式之一：
+  <code>Provide a short description for this region.</code>
+  或
+  <code>Provide the bounding box coordinate of the region this sentence describes.</code></li>
+</ul>
+<p>这里要明确说一句：<strong>论文没有把坐标字符串的精确序列化格式逐字段写出来。</strong></p>
+<p>因此，下面这个例子只是教学化示意，不应被当成论文明确给出的 released JSON 原样：</p>
+<pre><code class="language-json">{
+  &quot;from&quot;: &quot;human&quot;,
+  &quot;value&quot;: &quot;&lt;image&gt;\nProvide the bounding box coordinate of the region this sentence describes: the man holding the umbrella.&quot;
+}
+</code></pre>
+<p>可能的 target 语义是：</p>
+<pre><code class="language-json">{
+  &quot;from&quot;: &quot;gpt&quot;,
+  &quot;value&quot;: &quot;[x1, y1, x2, y2]&quot;
+}
+</code></pre>
+<p>但这里到底是：</p>
+<ul>
+<li>绝对像素</li>
+<li>归一化坐标</li>
+<li>逗号还是空格分隔</li>
+</ul>
+<p><strong>根据现有论文正文无法确认。</strong></p>
+<p>更稳妥的说法是：LLaVA-1.5 在 region-level 数据里被训练为输出<strong>区域级描述或区域定位结果</strong>，但具体字符串 schema 需要进一步查看 released data 才能完全确认。</p>
+<h3>6.4 dataloader 真正做了什么</h3>
+<p><code>train.py</code> 里的 <code>LazySupervisedDataset.__getitem__()</code> 可以概括成四步：</p>
+<ol>
+<li>读入第 <code>i</code> 条 JSON 样本</li>
+<li>如果有 <code>image</code>，就从 <code>image_folder + image</code> 路径打开图片</li>
+<li>对对话内容调用 <code>preprocess_multimodal()</code> 和 <code>preprocess()</code></li>
+<li>返回：</li>
+</ol>
+<pre><code class="language-python">{
+    &quot;input_ids&quot;: ...,
+    &quot;labels&quot;: ...,
+    &quot;image&quot;: ...   # 如果有图像
+}
+</code></pre>
+<p>再到 <code>DataCollatorForSupervisedDataset</code>：</p>
+<ul>
+<li><code>input_ids</code> 用 <code>tokenizer.pad_token_id</code> pad</li>
+<li><code>labels</code> 用 <code>IGNORE_INDEX=-100</code> pad</li>
+<li>如果 batch 中所有图像张量形状一致，就 <code>torch.stack</code></li>
+<li>否则保留为 list</li>
+</ul>
+<p>所以，模型前向之前，batch 已经具备：</p>
+<ul>
+<li>文本 token 序列</li>
+<li>监督 label</li>
+<li>图像张量</li>
+</ul>
+<h3>6.5 文本端预处理：<code>&lt;image&gt;</code> 是怎么被规范化的</h3>
+<p>这一点在 <code>preprocess_multimodal()</code> 里写得很清楚。</p>
+<p>如果某个 <code>sentence["value"]</code> 里有 <code>&lt;image&gt;</code>，代码会先：</p>
+<ul>
+<li>把原有 <code>&lt;image&gt;</code> 删除</li>
+<li>把文字 strip 干净</li>
+<li>再改写成：</li>
+</ul>
+<pre><code class="language-text">&lt;image&gt;
+真实问题文本
+</code></pre>
+<p>也就是说，无论原始 JSON 里 <code>&lt;image&gt;</code> 写在句首、句中还是句尾，进入训练模板前都会被规范化到<strong>第一行</strong>。</p>
+<p>例如，下面这两种原始写法：</p>
+<pre><code class="language-text">What color is the bus? &lt;image&gt;
+</code></pre>
+<p>和</p>
+<pre><code class="language-text">&lt;image&gt; What color is the bus?
+</code></pre>
+<p>最后都会被整理成：</p>
+<pre><code class="language-text">&lt;image&gt;
+What color is the bus?
+</code></pre>
+<p>这样做的目的很直接：</p>
+<ul>
+<li>避免 <code>&lt;image&gt;</code> 在训练样本中的相对位置乱飘</li>
+<li>让 prompt 模板更稳定</li>
+<li>让图像占位符与文本问题的界面统一</li>
+</ul>
+<h3>6.6 文本模板：一条样本最后会被拼成什么 prompt</h3>
+<p>基础版 <code>v1_5/finetune.sh</code> 使用 <code>--version v1</code>。在 <code>conversation.py</code> 里，<code>conv_llava_v1</code> 的关键配置是：</p>
+<ul>
+<li>system prompt：
+  <code>A chat between a curious human and an artificial intelligence assistant...</code></li>
+<li>roles：
+  <code>USER</code>, <code>ASSISTANT</code></li>
+<li>separator style：
+  <code>TWO</code></li>
+<li><code>sep = " "</code></li>
+<li><code>sep2 = "&lt;/s&gt;"</code></li>
+</ul>
+<p>因此，一条单轮视觉问答样本在真正 tokenization 前，可以近似理解为被串成：</p>
+<pre><code class="language-text">A chat between a curious human and an artificial intelligence assistant. ...
+ USER: &lt;image&gt;
+What color is the bus? Answer the question using a single word or phrase.
+ ASSISTANT: Yellow.&lt;/s&gt;
+</code></pre>
+<p>如果是多轮 conversation，就继续按：</p>
+<pre><code class="language-text"> USER: ...
+ ASSISTANT: ...&lt;/s&gt;
+ USER: ...
+ ASSISTANT: ...&lt;/s&gt;
+</code></pre>
+<p>这样的节奏串起来。</p>
+<p>这意味着：<strong>模型真正学习的不是一对“图像-答案”，而是一个带 system prompt、角色分隔符和多轮上下文的完整会话串。</strong></p>
+<h3>6.7 <code>&lt;image&gt;</code> 不是普通词表 token，而是一个特殊占位</h3>
+<p>LLaVA 的实现非常关键的一点是：<code>&lt;image&gt;</code> 不会在 tokenizer 阶段直接变成“576 个 patch token”。</p>
+<p>官方常量里写得很清楚：</p>
+<pre><code class="language-text">IGNORE_INDEX = -100
+IMAGE_TOKEN_INDEX = -200
+DEFAULT_IMAGE_TOKEN = &quot;&lt;image&gt;&quot;
+</code></pre>
+<p><code>tokenizer_image_token()</code> 的逻辑是：</p>
+<ol>
+<li>先按字符串 <code>&lt;image&gt;</code> 把 prompt split 成几段文本</li>
+<li>分别对文本段做 tokenizer</li>
+<li>在文本段之间插入 <code>IMAGE_TOKEN_INDEX=-200</code></li>
+</ol>
+<p>所以，对这一段：</p>
+<pre><code class="language-text">&lt;image&gt;
+What color is the bus?
+</code></pre>
+<p>tokenizer 之后，不是：</p>
+<pre><code class="language-text">[576个视觉token]
+</code></pre>
+<p>而更接近：</p>
+<pre><code class="language-text">[-200, t1, t2, t3, ...]
+</code></pre>
+<p>这里的 <code>-200</code> 只是一个逻辑占位。真正替换成视觉 embedding，要等到模型前向时才发生。</p>
+<p>另外，<code>v1_5</code> 官方脚本还显式设置了：</p>
+<ul>
+<li><code>mm_use_im_start_end False</code></li>
+<li><code>mm_use_im_patch_token False</code></li>
+</ul>
+<p>这说明在 LLaVA-1.5 的基础 recipe 里：</p>
+<ul>
+<li>不使用 <code>&lt;im_start&gt; &lt;image&gt; &lt;im_end&gt;</code></li>
+<li>也不在文本端显式放 <code>&lt;im_patch&gt;</code> 序列</li>
+</ul>
+<p>这是很多人第一次读代码时最容易误解的地方。</p>
+<h3>6.8 图像端预处理：<code>pad / resize / 插值 / normalize</code> 是怎么做的</h3>
+<p>这是你特别要求补充清楚的重点。这里要区分两种“插值”。</p>
+<h4>A. 像素级缩放插值</h4>
+<p>这是把原始图像缩放到 CLIP 需要的尺寸时，对像素做的重采样。</p>
+<h4>B. 位置编码插值</h4>
+<p>这是把 ViT 的位置编码表从旧网格大小插值到新网格大小。LLaVA-1.5-HD 讨论的是这一类，而且它选择尽量<strong>避免</strong>这种做法。</p>
+<p>先看基础版 LLaVA-1.5 的图像预处理。</p>
+<p>官方 <code>finetune.sh</code> 使用：</p>
+<pre><code class="language-text">--image_aspect_ratio pad
+</code></pre>
+<p>在 <code>LazySupervisedDataset.__getitem__()</code> 里，这条路径的处理逻辑是：</p>
+<ol>
+<li>读取原图 <code>PIL.Image</code></li>
+<li>调用 <code>expand2square()</code></li>
+<li>padding 背景色取自：</li>
+</ol>
+<pre><code class="language-python">tuple(int(x * 255) for x in processor.image_mean)
+</code></pre>
+<p>而 <code>clip-vit-large-patch14-336</code> 的 <code>image_mean</code> 是：</p>
+<pre><code class="language-text">[0.48145466, 0.4578275, 0.40821073]
+</code></pre>
+<p>因此背景色大约是：</p>
+<pre><code class="language-text">(122, 116, 104)
+</code></pre>
+<ol start="4">
+<li>再调用 <code>processor.preprocess(..., return_tensors='pt')</code></li>
+</ol>
+<p><code>preprocessor_config.json</code> 明确写了：</p>
+<ul>
+<li><code>size = 336</code></li>
+<li><code>crop_size = 336</code></li>
+<li><code>resample = 3</code></li>
+</ul>
+<p>而 Hugging Face 的 <code>CLIPImageProcessor</code> 源码里写得更直接：</p>
+<pre><code class="language-python">resample = PILImageResampling.BICUBIC
+</code></pre>
+<p>因此，基础版 <code>336</code> 路径下，图像像素缩放使用的是<strong>双三次插值（BICUBIC）</strong>。</p>
+<p>双三次插值可以简单理解为：</p>
+<ul>
+<li>输出图像里的一个新像素，不是只看最近的一个输入像素</li>
+<li>而是参考周围 <code>4 x 4</code> 邻域，共 16 个像素</li>
+<li>用三次核函数做加权，得到更平滑的缩放结果</li>
+</ul>
+<p>它通常比最近邻和双线性更适合视觉 backbone 的输入预处理。</p>
+<h4>具体例子：<code>640 x 480</code> 图像如何变成 CLIP 输入</h4>
+<p>假设原图大小是：</p>
+<pre><code class="language-text">W = 640, H = 480
+</code></pre>
+<p>按 <code>pad</code> 路径：</p>
+<ol>
+<li><code>expand2square()</code></li>
+</ol>
+<pre><code class="language-text">640 x 480 -&gt; 640 x 640
+</code></pre>
+<p>上下各补 <code>80</code> 像素背景。</p>
+<ol start="2">
+<li><code>CLIPImageProcessor.preprocess()</code></li>
+</ol>
+<ul>
+<li>先按 <code>size = 336</code> 缩放</li>
+<li>再按 <code>crop_size = 336</code> 做中心裁剪</li>
+</ul>
+<p>因为此时图已经是 <code>640 x 640</code> 正方形，所以最后直接得到：</p>
+<pre><code class="language-text">pixel_values in R^(3 x 336 x 336)
+</code></pre>
+<ol start="3">
+<li>再做归一化：</li>
+</ol>
+<pre><code class="language-text">x_norm = (x / 255 - mean) / std
+</code></pre>
+<p>其中 <code>mean/std</code> 用的是 CLIP 默认值。</p>
+<h4>对比：<code>anyres</code> / HD 辅助代码里的 resize 是怎么做的</h4>
+<p>当前官方 <code>mm_utils.py</code> 里还有一套 <code>anyres</code> 辅助逻辑：</p>
+<ul>
+<li><code>select_best_resolution()</code></li>
+<li><code>resize_and_pad_image()</code></li>
+<li><code>divide_to_patches()</code></li>
+<li><code>process_anyres_image()</code></li>
+</ul>
+<p>其中 <code>resize_and_pad_image()</code> 的逻辑是：</p>
+<ul>
+<li>在候选分辨率里选一个最优 <code>target_resolution</code></li>
+<li>选择标准是：优先让 <code>effective_resolution</code> 最大；如果并列，则让 <code>wasted_resolution</code> 最小</li>
+<li>依据长宽比算 <code>scale_w</code> 和 <code>scale_h</code></li>
+<li>选较小的缩放比例，保持原图比例</li>
+<li>用 <code>math.ceil()</code> 得到缩放后尺寸</li>
+<li>paste 到目标大画布中央</li>
+</ul>
+<p>这段 helper 代码里调用的是：</p>
+<pre><code class="language-python">resized_image = image.resize((new_width, new_height))
+</code></pre>
+<p>代码本身<strong>没有显式写出 resample 参数</strong>。因此，如果只依据这段 helper，我不能严谨地把它写死成某一种插值核。</p>
+<p>所以稳妥的结论是：</p>
+<ul>
+<li><strong>基础版 <code>pad -&gt; CLIPImageProcessor</code> 分支的插值，官方证据明确是 <code>BICUBIC</code></strong></li>
+<li><strong>repo 里的某些 <code>anyres</code> helper 只明确了 resize 动作，没有在该函数内部显式写出 resample 参数</strong></li>
+</ul>
+<h3>6.9 视觉编码器：CLIP 到底输出什么</h3>
+<p><code>openai/clip-vit-large-patch14-336</code> 的官方配置显示：</p>
+<ul>
+<li><code>image_size = 336</code></li>
+<li><code>patch_size = 14</code></li>
+<li><code>hidden_size = 1024</code></li>
+</ul>
+<p>所以基础版 <code>336</code> 路径下：</p>
+<ul>
+<li>每边 patch 数：<code>336 / 14 = 24</code></li>
+<li>patch token 总数：<code>24 x 24 = 576</code></li>
+</ul>
+<p>在 <code>clip_encoder.py</code> 里：</p>
+<ul>
+<li>取 <code>hidden_states[-2]</code></li>
+<li>如果 <code>select_feature == patch</code>，则丢弃 <code>CLS</code></li>
+</ul>
+<p>因此，单张图像的视觉输出可明确写成：</p>
+<pre><code class="language-text">V_clip in R^(576 x 1024)
+</code></pre>
+<p>如果 batch size 是 <code>B</code>，则为：</p>
+<pre><code class="language-text">V_clip in R^(B x 576 x 1024)
+</code></pre>
+<h3>6.10 MLP projector：到底把什么映射到什么</h3>
+<p>官方 <code>builder.py</code> 对 <code>mlp2x_gelu</code> 的实现是：</p>
+<pre><code class="language-python">Linear(mm_hidden_size, hidden_size)
+GELU()
+Linear(hidden_size, hidden_size)
+</code></pre>
+<p>这意味着 projector 的输入维度是视觉塔输出维度，输出维度是 LLM hidden size。</p>
+<p>对 <code>7B</code> 与 <code>13B</code> 两个版本，可以写成：</p>
+<ul>
+<li><code>Vicuna-7B-v1.5</code>：<code>hidden_size = 4096</code></li>
+<li><code>Vicuna-13B-v1.5</code>：<code>hidden_size = 5120</code></li>
+</ul>
+<p>因此：</p>
+<ul>
+<li><code>7B</code> 版本：</li>
+</ul>
+<pre><code class="language-text">R^(576 x 1024) -&gt; R^(576 x 4096)
+</code></pre>
+<ul>
+<li><code>13B</code> 版本：</li>
+</ul>
+<pre><code class="language-text">R^(576 x 1024) -&gt; R^(576 x 5120)
+</code></pre>
+<p>如果拿前面的 <code>640 x 480</code> 图像举例，13B 路径就是：</p>
+<pre><code class="language-text">pixel_values: [3, 336, 336]
+-&gt; CLIP: [576, 1024]
+-&gt; MLP projector: [576, 5120]
+</code></pre>
+<p>这一步完成后，视觉 token 才真正和 Vicuna 的词向量空间对齐。</p>
+<h3>6.11 多模态拼接：视觉 token 什么时候真正进入 LLM</h3>
+<p>真正关键的代码在 <code>llava_arch.py</code> 的 <code>prepare_inputs_labels_for_multimodal()</code>。</p>
+<p>它的核心逻辑是：</p>
+<ol>
+<li>先编码图像：</li>
+</ol>
+<pre><code class="language-python">image_features = self.encode_images(images)
+</code></pre>
+<p>其中：</p>
+<pre><code class="language-python">encode_images = vision_tower(images) -&gt; mm_projector(image_features)
+</code></pre>
+<ol start="2">
+<li>
+<p>找出文本 token 序列中所有 <code>IMAGE_TOKEN_INDEX=-200</code> 的位置</p>
+</li>
+<li>
+<p>把文本 token 序列切成：</p>
+</li>
+</ol>
+<ul>
+<li>图像占位符之前的文本片段</li>
+<li>图像占位符之后的文本片段</li>
+</ul>
+<ol start="4">
+<li>对这些纯文本片段调用：</li>
+</ol>
+<pre><code class="language-python">self.get_model().embed_tokens(...)
+</code></pre>
+<ol start="5">
+<li>在原来 <code>-200</code> 的位置，插入真实的 <code>cur_image_features</code></li>
+</ol>
+<p>也就是说，文本和图像最终不是在 token ID 层拼接，而是在 <strong>embedding 层</strong> 拼接。</p>
+<p>教学化地写，一条样本在进入 LLM 前更像：</p>
+<pre><code class="language-text">[text_embed_before]
++ [576 visual embeds]
++ [text_embed_after]
+</code></pre>
+<p>而不是：</p>
+<pre><code class="language-text">[普通词表 token ids]
+</code></pre>
+<h3>6.12 label 是怎么 mask 的，loss 到底监督谁</h3>
+<p>这是训练实现里最核心的监督细节之一。</p>
+<p><code>train.py</code> 中多个 <code>preprocess_*()</code> 函数都会把 <code>targets = input_ids.clone()</code>，然后把不该计算损失的部分置成：</p>
+<pre><code class="language-text">IGNORE_INDEX = -100
+</code></pre>
+<p>被 mask 的部分包括：</p>
+<ul>
+<li>human 输入轮</li>
+<li>system prompt</li>
+<li>插入进去的图像特征位置</li>
+<li>padding 位置</li>
+</ul>
+<p>最终真正参与 loss 的，主要只有：</p>
+<ul>
+<li>assistant 输出文本 token</li>
+</ul>
+<p>在 <code>prepare_inputs_labels_for_multimodal()</code> 里，插入视觉 token 时还会显式为它们生成一段：</p>
+<pre><code class="language-python">torch.full((cur_image_features.shape[0],), IGNORE_INDEX)
+</code></pre>
+<p>所以，视觉 embedding 本身不会被当作“要预测的 token”。</p>
+<p>这一步的意义很重要：</p>
+<ul>
+<li>模型输入里包含视觉 token</li>
+<li>但训练目标不是“预测图像 token”</li>
+<li>而是“在看过图像和文字后，正确预测 assistant 文本输出”</li>
+</ul>
+<h3>6.13 <code>response formatting prompt</code> 为什么从实现上真的有效</h3>
+<p>从实现角度说，这个改动的本质不是新模块，而是改变了<strong>监督文本的条件结构</strong>。</p>
+<p>例如原问题是：</p>
+<pre><code class="language-text">What color is the shirt?
+</code></pre>
+<p>经过格式增强后变成：</p>
+<pre><code class="language-text">What color is the shirt? Answer the question using a single word or phrase.
+</code></pre>
+<p>这会直接改变：</p>
+<ul>
+<li>tokenizer 后的输入 token 序列</li>
+<li>assistant 目标文本的条件分布</li>
+<li>label 监督对应的输出风格</li>
+</ul>
+<p>也就是说，格式控制不是“推理时小技巧”，而是<strong>训练时写进监督数据本身的条件变量</strong>。</p>
+<h3>6.14 <code>LLaVA-1.5-HD</code>：高分辨率路径到底怎么处理</h3>
+<p><img alt="图 3 论文 Figure 2：LLaVA-1.5-HD 的高分辨率处理思路" src="assets/figure2_hd_architecture.jpg"></p>
+<p>论文附录对 <code>HD</code> 版本的流程写得比正文更细。其核心思想是：</p>
+<ul>
+<li>基础视觉塔使用 <code>CLIP-ViT-L-14 (224^2)</code></li>
+<li>不把 ViT 强行改造成新的大输入分辨率</li>
+<li>而是把大图拆成若干 <code>224 x 224</code> tile，在原始 CLIP 训练分辨率上分别编码</li>
+</ul>
+<p>附录给出的步骤是：</p>
+<ol>
+<li>选择目标分辨率</li>
+<li>pad 到该分辨率</li>
+<li>切成 <code>224 x 224</code> 网格</li>
+<li>每个 tile 独立过 CLIP</li>
+<li>合并为大特征图</li>
+<li>移除只对应 padding 的特征</li>
+<li>给每一行末尾加 <code>row-end token</code></li>
+<li>flatten</li>
+<li>再拼接一个固定低分辨率全局视图特征</li>
+</ol>
+<p>当前 repo 的 <code>process_anyres_image()</code> 也体现了这个“全局视图 + 局部 patches”的思路。它会先构造：</p>
+<pre><code class="language-python">image_original_resize = image.resize((processor.size['shortest_edge'], processor.size['shortest_edge']))
+image_patches = [image_original_resize] + patches
+</code></pre>
+<p>也就是说，<strong>全局视图会被放在 patch 列表最前面</strong>，后面再接各个局部块。这个实现细节和论文附录中“额外拼接一个 global context”是对齐的。需要注意的是：</p>
+<ul>
+<li>论文附录讨论的是 <code>224</code> 基础编码器的 <code>HD</code> 版本</li>
+<li>当前 repo 的 <code>anyres</code> helper 是更通用的实现骨架</li>
+</ul>
+<p>两者思想一致，但不应把 repo 里的所有后续泛化实现细节都机械等同为本文附录逐字描述。</p>
+<h4>一个具体例子：如果最终选中 <code>672 x 448</code></h4>
+<p>这相当于 <code>3 x 2</code> 个 <code>224 x 224</code> tile。</p>
+<p>每个 tile 经 <code>CLIP-ViT-L/14-224</code> 后：</p>
+<ul>
+<li>每边 patch 数：<code>224 / 14 = 16</code></li>
+<li>每个 tile 的 patch token 数：<code>16 x 16 = 256</code></li>
+</ul>
+<p>如果一共 <code>6</code> 个 tile，那么局部特征总数大致是：</p>
+<pre><code class="language-text">6 x 256 = 1536
+</code></pre>
+<p>把它拼回二维后，特征图网格相当于：</p>
+<pre><code class="language-text">height = 2 x 16 = 32
+width  = 3 x 16 = 48
+</code></pre>
+<p>如果每一行末尾都加一个 <code>row-end token</code>，那么只看局部特征这部分，token 数会从：</p>
+<pre><code class="language-text">32 x 48 = 1536
+</code></pre>
+<p>变成：</p>
+<pre><code class="language-text">32 x (48 + 1) = 1568
+</code></pre>
+<p>再加一个全局 <code>224 x 224</code> 视图的 <code>256</code> 个 patch token，最终视觉 token 数大致会是：</p>
+<pre><code class="language-text">1568 + 256 = 1824
+</code></pre>
+<p>这里还要注意：</p>
+<ul>
+<li>如果边缘有 padding 被移除，真实 token 数会略小于这个满格估算值</li>
+<li>所以这只是帮助理解的形状示意</li>
+</ul>
+<h3>6.15 这里的“插值”到底有哪两种，论文到底避免了哪一种</h3>
+<p>这是最容易混淆的地方，我单独拆开说。</p>
+<h4>A. 图像像素插值</h4>
+<p>这是把原图缩放到 <code>336 x 336</code> 或 <code>224 x 224</code> 时，对像素做 <code>BICUBIC</code> 等重采样。LLaVA-1.5 基础版明确会做这件事。</p>
+<h4>B. ViT 位置编码插值</h4>
+<p>传统高分辨率 ViT 适配常见做法是：</p>
+<ol>
+<li>原始位置编码表只对应旧网格，比如 <code>16 x 16</code></li>
+<li>想支持新分辨率，比如 <code>24 x 24</code></li>
+<li>就把位置编码 reshape 成二维网格后做插值，再 flatten 回去</li>
+</ol>
+<p>教学化写成：</p>
+<pre><code class="language-text">E_pos in R^(16 x 16 x d)
+-&gt; interpolate
+-&gt; E_pos_new in R^(24 x 24 x d)
+</code></pre>
+<p>论文说很多方法扩展分辨率时会走这条路，而 <code>LLaVA-1.5-HD</code> 则尽量避免它：</p>
+<ul>
+<li>它不是把 ViT 主干本身“拉伸到更大输入”</li>
+<li>而是让每个 tile 都继续使用 ViT 原生训练分辨率</li>
+</ul>
+<p>所以，LLaVA-1.5-HD 避免的主要是<strong>位置编码插值 + 大规模额外高分辨率预训练</strong>这条路径，不是完全不做任何像素 resize。</p>
+<h3>6.16 这篇论文里几个容易混淆的专业名词</h3>
+<ul>
+<li>
+<p><code>Visual Instruction Tuning</code>
+  给模型的训练目标不只是“看图说话”，而是“看图后遵循指令回答”。</p>
+</li>
+<li>
+<p><code>Academic-task-oriented data</code>
+  指 benchmark 风格较强、答案格式受约束的数据，如短答、多选、OCR、区域级问答。</p>
+</li>
+<li>
+<p><code>Projector / Connector</code>
+  把视觉 token 从视觉空间映射到语言模型 hidden space 的桥接层。</p>
+</li>
+<li>
+<p><code>Patch token</code>
+  ViT 把图像切成 patch 后，每个 patch 对应一个 token 向量。</p>
+</li>
+<li>
+<p><code>Row-end token</code>
+  <code>HD</code> 路径里人为添加的“行结束标记”，帮助 LLM 感知二维布局。</p>
+</li>
+<li>
+<p><code>Compositional capability</code>
+  指模型把不同训练来源学到的能力组合起来，例如英文视觉对话能力和多语种文本对话能力组合后，产生多语种视觉对话。</p>
+</li>
+<li>
+<p><code>Hallucination</code>
+  输出了图里没有的内容，或者把视觉证据不足的部分强行编成看起来合理的答案。</p>
+</li>
+</ul>
+<h2>7. 数据处理细节、样本格式与目标格式</h2>
+<h3>7.1 两阶段数据规模与作用分工</h3>
+<p>论文明确沿用了 LLaVA 的两阶段训练。</p>
+<ul>
+<li>
+<p><strong>阶段 1：vision-language alignment pretraining</strong>
+  目标是把视觉特征投到 LLM 可以消费的空间。</p>
+</li>
+<li>
+<p><strong>阶段 2：visual instruction tuning</strong>
+  目标是让模型学会不同任务风格下的回答行为。</p>
+</li>
+</ul>
+<p>结合论文表 3 与附录：</p>
+<ul>
+<li>预训练：<code>558K</code></li>
+<li>指令微调：<code>665K</code></li>
+</ul>
+<p>这里需要保留一条不确定性：</p>
+<ul>
+<li>原始 LLaVA 相关资料里经常会见到约 <code>595K</code></li>
+<li>本文表 3 用的是 <code>558K</code></li>
+<li><strong>根据现有信息无法确认两者口径差异</strong></li>
+</ul>
+<p>更稳妥的结论是：LLaVA 与 LLaVA-1.5 的第一阶段都属于约 <code>0.56M ~ 0.60M</code> 的小规模 alignment 数据，而不是数亿级对齐预训练。</p>
+<h3>7.2 LLaVA-1.5 的 665K 数据混合</h3>
+<p>附录 Table 7 给出最终 mixture：</p>
+<ul>
+<li><code>LLaVA [36]</code>：<code>158K</code></li>
+<li><code>ShareGPT [46]</code>：<code>40K</code></li>
+<li><code>VQAv2 [19]</code>：<code>83K</code></li>
+<li><code>GQA [21]</code>：<code>72K</code></li>
+<li><code>OKVQA [41]</code>：<code>9K</code></li>
+<li><code>OCRVQA [42]</code>：<code>80K</code></li>
+<li><code>A-OKVQA [45]</code>：<code>66K</code></li>
+<li><code>TextCaps [47]</code>：<code>22K</code></li>
+<li><code>RefCOCO [24, 40]</code>：<code>48K</code></li>
+<li><code>Visual Genome [25]</code>：<code>86K</code></li>
+<li>总计：<code>665K</code></li>
+</ul>
+<p>其中，最关键的不是“多”，而是<strong>每类数据对应什么目标输出格式</strong>。因为格式要求本身已经被写进训练文本。</p>
+<h3>7.3 官方 README 给出的图像目录组织</h3>
+<p>论文正文不写磁盘目录，但官方 README 给了 released 数据组织方式：</p>
+<pre><code class="language-text">playground/data/
+├── coco/
+│   └── train2017/
+├── gqa/
+│   └── images/
+├── ocr_vqa/
+│   └── images/
+├── textvqa/
+│   └── train_images/
+└── vg/
+    ├── VG_100K/
+    └── VG_100K_2/
+</code></pre>
+<p>这说明 <code>image</code> 字段本质上就是<strong>相对路径索引</strong>，而不是图像字节直接写入 JSON。</p>
+<h3>7.4 论文附录明确给出的数据处理规则</h3>
+<p>附录 A.2 给了 7 条直接影响训练行为的规则：</p>
+<ul>
+<li>所有 VQA 数据中，同一训练图像上的 QA 会合并成一个 conversation。</li>
+<li><code>ShareGPT</code> 会过滤无效对话；超过 <code>2048</code> token 的长对话会截断，而不是切成多条。</li>
+<li><code>A-OKVQA</code> 会按选项数增广，以补足 multiple-choice 数据。</li>
+<li><code>OCRVQA</code> 抽样成 <code>80K conversations</code>。</li>
+<li><code>Visual Genome</code> 对高标注密度图像采样 <code>10</code> 个 annotation。</li>
+<li><code>RefCOCO</code> conversation 被切成每段少于 <code>10</code> 轮。</li>
+<li>每个 batch 只采样单一模态 conversation，作者报告这样提速约 <code>25%</code>。</li>
+</ul>
+<p>最后，所有 split 会拼接并以相同概率采样。</p>
+<h3>7.5 基础版 <code>pad</code> 路径的数据格式与目标格式例子</h3>
+<p>这里给一个从文件到标签的完整示意。</p>
+<p>原始样本：</p>
+<pre><code class="language-json">{
+  &quot;id&quot;: &quot;coco-example-1&quot;,
+  &quot;image&quot;: &quot;coco/train2017/000000391895.jpg&quot;,
+  &quot;conversations&quot;: [
+    {
+      &quot;from&quot;: &quot;human&quot;,
+      &quot;value&quot;: &quot;What color is the shirt that the man is wearing? &lt;image&gt; Answer the question using a single word or phrase.&quot;
+    },
+    {
+      &quot;from&quot;: &quot;gpt&quot;,
+      &quot;value&quot;: &quot;Yellow.&quot;
+    }
+  ]
+}
+</code></pre>
+<p><code>preprocess_multimodal()</code> 之后：</p>
+<pre><code class="language-json">{
+  &quot;from&quot;: &quot;human&quot;,
+  &quot;value&quot;: &quot;&lt;image&gt;\nWhat color is the shirt that the man is wearing? Answer the question using a single word or phrase.&quot;
+}
+</code></pre>
+<p>套上 <code>v1</code> conversation template 之后，训练 prompt 近似变成：</p>
+<pre><code class="language-text">SYSTEM ...
+ USER: &lt;image&gt;
+What color is the shirt that the man is wearing? Answer the question using a single word or phrase.
+ ASSISTANT: Yellow.&lt;/s&gt;
+</code></pre>
+<p>目标标签的语义则是：</p>
+<ul>
+<li>
+<p><code>SYSTEM</code>
+  不计 loss</p>
+</li>
+<li>
+<p><code>USER</code> 问题部分
+  不计 loss</p>
+</li>
+<li>
+<p><code>&lt;image&gt;</code> 占位替换出的视觉 embedding 段
+  不计 loss</p>
+</li>
+<li>
+<p><code>ASSISTANT: Yellow.</code>
+  其中真正的 assistant 内容参与 loss</p>
+</li>
+</ul>
+<h3>7.6 一个具体张量例子：<code>640 x 480</code> 图像进入 <code>13B</code> 基础版</h3>
+<p>假设：</p>
+<ul>
+<li>图像大小：<code>640 x 480</code></li>
+<li>模型：<code>LLaVA-1.5-13B</code></li>
+</ul>
+<p>那么可以近似写成：</p>
+<pre><code class="language-text">raw PIL image:               [640, 480]
+expand2square:               [640, 640]
+CLIP preprocess output:      [3, 336, 336]
+CLIP patch features:         [576, 1024]
+MLP projector output:        [576, 5120]
+Vicuna text embeddings:      [T, 5120]
+fused sequence embeddings:   [T - 1 + 576, 5120]
+</code></pre>
+<p>为什么是 <code>T - 1 + 576</code>？</p>
+<ul>
+<li>因为文本里原本只有一个 <code>&lt;image&gt;</code> 占位</li>
+<li>它会被 <code>576</code> 个真实视觉 embedding 替换</li>
+<li>所以总长度增加了 <code>575</code></li>
+</ul>
+<p>如果是 <code>7B</code> 版本，唯一的主要区别是 projector 输出和文本 embedding 维度换成 <code>4096</code>。</p>
+<h3>7.7 一个具体张量例子：<code>HD</code> 版本的 <code>3 x 2</code> 网格</h3>
+<p>如果高分辨率版本为某张图选择了 <code>672 x 448</code> 目标分辨率，那么：</p>
+<ul>
+<li>它可以切成 <code>3 x 2</code> 个 <code>224 x 224</code> tile</li>
+<li>每个 tile 对应 <code>16 x 16 = 256</code> 个 patch token</li>
+</ul>
+<p>于是：</p>
+<pre><code class="language-text">6 local tiles           -&gt; 1536 local patch tokens
+row-end tokens (32 rows) -&gt; +32
+global 224-view          -&gt; +256
+estimated total          -&gt; 1824 visual tokens
+</code></pre>
+<p>这说明 <code>HD</code> 路径的视觉 token 数远高于基础版 <code>576</code>，也解释了它为什么更擅长看细节，但代价更高。</p>
+<h2>8. 训练阶段详解与实现伪代码</h2>
+<h3>8.1 阶段 1：vision-language alignment pretraining</h3>
+<p>论文说 LLaVA-1.5 在第一阶段沿用原始 LLaVA 的思路，只是把 projector 从线性层换成了 MLP，并把预训练学习率减半。</p>
+<p>官方 <code>scripts/v1_5/pretrain.sh</code> 给出的关键信息是：</p>
+<ul>
+<li><code>data_path = blip_laion_cc_sbu_558k.json</code></li>
+<li><code>vision_tower = openai/clip-vit-large-patch14-336</code></li>
+<li><code>mm_projector_type = mlp2x_gelu</code></li>
+<li><code>tune_mm_mlp_adapter = True</code></li>
+<li><code>mm_vision_select_layer = -2</code></li>
+<li><code>num_train_epochs = 1</code></li>
+<li><code>learning_rate = 1e-3</code></li>
+</ul>
+<p>这说明第一阶段的主要目标是<strong>把 MLP projector 学出来</strong>。从脚本看，最直接的训练对象就是 <code>mm_mlp_adapter</code>。</p>
+<p>可教学化地写成伪代码：</p>
+<pre><code class="language-python">for batch in pretrain_loader:  # image-caption pairs
+    images = batch[&quot;image&quot;]
+    captions = batch[&quot;caption&quot;]
+
+    pixel_values = image_processor(images)           # [B, 3, 336, 336]
+    visual_tokens = clip_tower(pixel_values)         # [B, 576, d_v]
+    visual_tokens = mlp_projector(visual_tokens)     # [B, 576, d_l]
+
+    prompt_tokens = tokenizer(captions)
+    model_inputs = fuse_image_tokens_with_text(
+        visual_tokens,
+        prompt_tokens
+    )
+
+    loss = causal_lm_loss(model_inputs, target=captions)
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
+</code></pre>
+<p>这里要注意两点：</p>
+<ul>
+<li>这段伪代码强调的是<strong>数据流</strong>，不是逐行复现官方训练器。</li>
+<li>第一阶段更像“对齐视觉 token 到 LLM 可读空间”，不是完整意义上的多任务视觉指令学习。</li>
+</ul>
+<h3>8.2 阶段 2：visual instruction tuning</h3>
+<p>第二阶段才是 LLaVA-1.5 的核心。</p>
+<p>官方 <code>scripts/v1_5/finetune.sh</code> 给出的关键信息包括：</p>
+<ul>
+<li><code>data_path = llava_v1_5_mix665k.json</code></li>
+<li><code>pretrain_mm_mlp_adapter = .../mm_projector.bin</code></li>
+<li><code>mm_projector_type = mlp2x_gelu</code></li>
+<li><code>image_aspect_ratio = pad</code></li>
+<li><code>group_by_modality_length = True</code></li>
+<li><code>num_train_epochs = 1</code></li>
+<li><code>learning_rate = 2e-5</code></li>
+</ul>
+<p>这说明第二阶段做了几件事情：</p>
+<ul>
+<li>读取第一阶段训练好的 projector 权重</li>
+<li>用 665K 多源指令数据做全模型级别的视觉指令微调</li>
+<li>对非正方形图像采用 <code>pad</code>，即补边到合适长宽比</li>
+<li>按模态长度分组，提高训练效率</li>
+</ul>
+<p>这一阶段可以写成更接近真实训练器的伪代码：</p>
+<pre><code class="language-python">for sample in instruct_loader:
+    image = load_image(sample[&quot;image&quot;]) if &quot;image&quot; in sample else None
+    conversation = sample[&quot;conversations&quot;]
+
+    prompt, labels = build_supervised_prompt_and_labels(conversation)
+
+    if image is not None:
+        pixel_values = image_processor(image, aspect_ratio=&quot;pad&quot;)
+        visual_tokens = clip_tower(pixel_values)         # [1, N_v, d_v]
+        visual_tokens = mlp_projector(visual_tokens)     # [1, N_v, d_l]
+    else:
+        visual_tokens = None
+
+    input_ids = tokenizer(prompt)
+    multimodal_inputs = insert_image_tokens(input_ids, visual_tokens)
+
+    loss = causal_lm_loss(
+        multimodal_inputs,
+        labels=mask_non_assistant_tokens(labels)
+    )
+
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
+</code></pre>
+<p>如果是 VQA / 多选 / OCR 数据，<code>build_supervised_prompt_and_labels</code> 这一步还会把格式提示拼进去，例如：</p>
+<pre><code class="language-text">&lt;image&gt;
+Question ...
+Answer the question using a single word or phrase.
+</code></pre>
+<p>或者：</p>
+<pre><code class="language-text">&lt;image&gt;
+Question ...
+Answer with the option’s letter from the given choices directly.
+</code></pre>
+<h3>8.3 阶段 3：如果使用 LLaVA-1.5-HD，还要多一个高分辨率预处理分支</h3>
+<p>论文附录明确说，<code>HD</code> 版本<strong>不做额外高分辨率 pretraining</strong>，而是直接在高分辨率图像上做 visual instruction tuning。</p>
+<p>教学化伪代码可以写成：</p>
+<pre><code class="language-python">def encode_hd_image(image):
+    target_res = choose_target_resolution(image)
+    image_pad = pad_and_resize(image, target_res)
+    tiles = split_into_224_grids(image_pad)
+
+    tile_features = []
+    for tile in tiles:
+        feat = clip_tower(tile)                    # [1, 256, d_v] or patch-grid form
+        tile_features.append(feat)
+
+    feature_map = merge_tiles(tile_features)
+    feature_map = remove_padding_features(feature_map)
+    feature_map = append_row_end_tokens(feature_map)
+    visual_tokens = flatten(feature_map)
+
+    global_view = resize_to_224(image)
+    global_tokens = clip_tower(global_view)
+
+    return concat(global_tokens, visual_tokens)
+</code></pre>
+<p>再把 <code>concat(global_tokens, visual_tokens)</code> 送入 projector 和 LLM 即可。</p>
+<h3>8.4 论文给出的超参数</h3>
+<p>Table 9 给出的关键超参数如下：</p>
+<ul>
+<li>预训练 batch size：<code>256</code></li>
+<li>指令微调 batch size：<code>128</code></li>
+<li>预训练学习率：<code>1e-3</code></li>
+<li>指令微调学习率：<code>2e-5</code></li>
+<li>学习率调度：<code>cosine decay</code></li>
+<li>warmup ratio：<code>0.03</code></li>
+<li>weight decay：<code>0</code></li>
+<li>optimizer：<code>AdamW</code></li>
+<li>DeepSpeed stage：预训练 <code>2</code>，微调 <code>3</code></li>
+<li>评测解码：<code>greedy decoding</code></li>
+</ul>
+<p>论文表 9 的文本提取结果显示 <code>epoch = 1</code>。官方 <code>v1_5/pretrain.sh</code> 与 <code>v1_5/finetune.sh</code> 也都使用 <code>num_train_epochs 1</code>，因此这一点和论文是一致的。</p>
+<h2>9. 实验结果说明了什么</h2>
+<h3>9.1 最有价值的是 Table 2 的逐步消融链条</h3>
+<p>这张表几乎就是 LLaVA-1.5 的“成长日志”。</p>
+<ul>
+<li>
+<p>基线 <code>LLaVA 7B 224</code>
+  <code>MME = 809.6</code>，<code>MM-Vet = 25.5</code></p>
+</li>
+<li>
+<p><code>+ VQAv2</code>
+  <code>MME</code> 直接到 <code>1197.0</code></p>
+</li>
+<li>
+<p><code>+ Format prompt</code>
+  <code>MME</code> 进一步到 <code>1323.8</code></p>
+</li>
+<li>
+<p><code>+ MLP VL connector</code>
+  <code>MME = 1355.2</code></p>
+</li>
+<li>
+<p><code>+ OKVQA / OCR</code>
+  <code>MME = 1377.6</code>，<code>MM-Vet = 29.6</code></p>
+</li>
+<li>
+<p><code>+ Region-level VQA</code>
+  <code>MME = 1426.5</code>，<code>MM-Vet = 30.8</code></p>
+</li>
+<li>
+<p><code>+ Scale up resolution to 336</code>
+  <code>GQA = 51.4</code>，<code>MME = 1450</code></p>
+</li>
+<li>
+<p><code>+ GQA</code>
+  <code>GQA = 62.0</code></p>
+</li>
+<li>
+<p><code>+ ShareGPT</code>
+  <code>MME = 1510.7</code></p>
+</li>
+<li>
+<p><code>+ Scale up LLM to 13B</code>
+  <code>GQA = 63.3</code>，<code>MME = 1531.3</code>，<code>MM-Vet = 36.1</code></p>
+</li>
+</ul>
+<p>这条链条最能说明论文真正的贡献：</p>
+<ul>
+<li>不是单点神奇模块；</li>
+<li>而是多个简单修改的组合；</li>
+<li>其中前半段最大收益来自<strong>数据与输出格式控制</strong>；</li>
+<li>后半段再叠加分辨率、ShareGPT 和更强 LLM。</li>
+</ul>
+<h3>9.2 最终 benchmark 结果</h3>
+<p>论文表 3 和表 4 给出的结论可以概括为：</p>
+<ul>
+<li>在 academic-task-oriented benchmarks 上，<code>LLaVA-1.5 13B</code> 在 <code>VQAv2 / GQA / VizWiz / ScienceQA-IMG / TextVQA</code> 中拿到很强结果。</li>
+<li>在 instruction-following benchmarks 上，<code>LLaVA-1.5</code> 相比原始 LLaVA 全面提升。</li>
+<li><code>LLaVA-1.5-HD</code> 在很多需要细节感知的任务上继续提升，尤其是 OCR 与细粒度理解场景。</li>
+</ul>
+<p>较有代表性的数字包括：</p>
+<ul>
+<li>
+<p><code>LLaVA-1.5 13B</code>
+  <code>VQAv2 = 80.0</code>
+  <code>GQA = 63.3</code>
+  <code>VizWiz = 53.6</code>
+  <code>ScienceQA-IMG = 71.6</code>
+  <code>TextVQA = 61.3</code></p>
+</li>
+<li>
+<p><code>LLaVA-1.5-HD 13B</code>
+  <code>VQAv2 = 81.8</code>
+  <code>GQA = 64.7</code>
+  <code>VizWiz = 57.5</code>
+  <code>TextVQA = 62.5</code></p>
+</li>
+<li>
+<p><code>LLaVA-1.5 13B</code> 在 instruction-following 侧
+  <code>MME = 1531.3</code>
+  <code>MMBench-en = 67.7</code>
+  <code>MMBench-cn = 63.6</code>
+  <code>SEED-Bench = 68.2</code>
+  <code>LLaVA-Bench = 72.5</code>
+  <code>MM-Vet = 36.1</code></p>
+</li>
+</ul>
+<h3>9.3 论文特别强调的几个“涌现性质”</h3>
+<h4>A. 格式指令泛化</h4>
+<p>论文指出，虽然训练里只用了有限几种格式提示，但模型能够泛化到其它格式要求。</p>
+<p><img alt="图 4 论文 Table 5：LLaVA-1.5 能识别带错误前提的 tricky question" src="assets/table5_tricky_question.jpg"></p>
+<p>例如：</p>
+<ul>
+<li>识别问题前提是否错误</li>
+<li>生成受约束的 JSON 输出</li>
+<li>在同一对话中切换“单词回答 / 简短句子 / 详细解释”</li>
+</ul>
+<p><img alt="图 5 论文 Table 6：LLaVA-1.5 可以按约束格式输出结构化 JSON" src="assets/table6_json_output.jpg"></p>
+<h4>B. 多语种视觉对话</h4>
+<p>论文给出的解释是：视觉指令数据虽然是英文，但 <code>ShareGPT</code> 文本数据里包含多语种，因此模型学会了一定的“按用户语言作答”的行为，并把这种行为组合到视觉任务里。</p>
+<p><img alt="图 6 论文 Figure 5：由 ShareGPT 带来的多语种视觉对话组合能力" src="assets/figure5_multilingual.jpg"></p>
+<p>这不是“模型真正精通所有语言”的证据。论文自己也承认：某些语言仍有错误，比如韩语示例里就有问题。</p>
+<h4>C. 数据效率</h4>
+<p>论文第 5.1 节报告：即使把 1.5 的训练数据随机下采样到 <code>50%</code>，模型仍可保持超过 <code>98%</code> 的全量性能。这个结果说明，LLaVA-1.5 的训练 recipe 还有继续压缩数据的空间。</p>
+<h4>D. 幻觉与分辨率的关系</h4>
+<p>作者在第 5.2 节提出一个很值得注意的观察：有些 hallucination 也许不只是“训练数据幻觉”造成的，而和模型是否真的看清图像细节有关。分辨率提高后，幻觉明显降低。</p>
+<h2>10. 我如何理解这篇论文的“改进”和“创新”</h2>
+<h3>10.1 它的创新不是复杂结构，而是更好的 recipe</h3>
+<p>如果严格从结构创新角度看，LLaVA-1.5 的变化并不剧烈：</p>
+<ul>
+<li>没有引入新的 cross-attention 栈</li>
+<li>没有引入新的 query bottleneck</li>
+<li>没有设计新的训练损失</li>
+<li>没有做超大规模额外预训练</li>
+</ul>
+<p>所以，把它称为“结构革命”并不准确。</p>
+<p>但如果从大模型工程与研究 recipe 的角度看，它有相当清楚的创新价值：</p>
+<ul>
+<li>把“自然视觉对话”和“academic VQA”之间的冲突定位到了<strong>输出格式控制</strong>与<strong>数据配比</strong>问题，而不只是架构问题。</li>
+<li>用非常便宜的 <code>MLP projector</code> 替代更复杂 resampler，证明简单桥接层仍然有很强潜力。</li>
+<li>用公开数据配出一套强 baseline，降低了复现门槛。</li>
+<li>把“高分辨率输入”“组合能力”“幻觉问题”放进同一篇工作里做早期系统性探索。</li>
+</ul>
+<h3>10.2 为什么 <code>response formatting prompt</code> 是真正关键的改进</h3>
+<p>我认为这是全篇最容易被低估的点。</p>
+<p>很多人读这篇论文时，第一眼看到的是：</p>
+<ul>
+<li>MLP projector</li>
+<li>336 分辨率</li>
+<li>更多 benchmark</li>
+</ul>
+<p>但从 Table 2 的消融顺序看，<code>format prompt</code> 的作用非常直接，因为它改变的是<strong>监督信号的语义边界</strong>：</p>
+<ul>
+<li>不加时，模型只能从数据分布里猜“这里要短答还是长答”</li>
+<li>加了以后，模型在训练时就知道“短答是一个明确任务条件，而不是一个潜在风格偏差”</li>
+</ul>
+<p>这使得多源数据混合不再那么容易相互污染行为风格。</p>
+<h3>10.3 为什么 <code>ShareGPT</code> 会帮助多模态能力</h3>
+<p>这也是一个容易误解的点。<code>ShareGPT</code> 本身没有图片，所以它并不是直接补视觉知识。</p>
+<p>它更像在补三类能力：</p>
+<ul>
+<li>长对话组织能力</li>
+<li>更自然的语言风格</li>
+<li>多语种响应习惯</li>
+</ul>
+<p>当这些能力和视觉对话能力放在同一个 instruction tuning 阶段共同优化时，就出现了论文所谓的 <code>compositional capabilities</code>。</p>
+<h3>10.4 为什么高分辨率会减少幻觉</h3>
+<p>这个现象背后的直觉其实很自然：</p>
+<ul>
+<li>如果图像被压缩到较低分辨率，小文字、小物体、局部关系很可能本来就看不清。</li>
+<li>当视觉证据不足时，LLM 更容易靠语言先验补全。</li>
+<li>一旦分辨率提高，模型拿到的视觉证据变强，靠语言猜测的空间就变小。</li>
+</ul>
+<p>所以，论文把“幻觉”部分归因为<strong>视觉证据不足 + 语言先验过强</strong>，这是一种比“全怪数据脏”更细致的解释。</p>
+<h2>11. 训练实现层面最值得记住的细节</h2>
+<ul>
+<li>官方视觉塔默认取倒数第二层 <code>hidden_states[-2]</code></li>
+<li>默认使用 <code>patch</code> feature，因此会去掉 <code>CLS</code></li>
+<li>第一阶段脚本里显式打开 <code>tune_mm_mlp_adapter True</code></li>
+<li>第二阶段脚本里显式加载 <code>pretrain_mm_mlp_adapter</code></li>
+<li>第二阶段使用 <code>image_aspect_ratio pad</code></li>
+<li>第二阶段使用 <code>group_by_modality_length True</code></li>
+<li>第一阶段和第二阶段官方脚本都写的是 <code>1 epoch</code></li>
+<li>评测使用 <code>greedy decoding</code></li>
+</ul>
+<p>这些实现细节说明：LLaVA-1.5 不是“论文里说一个抽象思想，代码里完全是另一套复杂系统”，而是<strong>论文结论和公开 recipe 基本一致</strong>。</p>
+<h2>12. 局限性、不确定点与需要进一步核实的地方</h2>
+<p>论文自己承认的局限包括：</p>
+<ul>
+<li>仍然使用 full image patches，训练和推理开销会更高。</li>
+<li>还不支持多图输入。</li>
+<li>某些复杂问题求解能力仍受限于基础 LLM 和目标数据质量。</li>
+<li>幻觉虽降低，但并没有彻底消失。</li>
+<li>在关键应用场景中仍需谨慎使用。</li>
+</ul>
+<p>我认为还需要额外标记的“不确定点”有：</p>
+<ul>
+<li>论文没有在正文里完整打印 released <code>llava_v1_5_mix665k.json</code> 的全部字段 schema。</li>
+<li>原始 LLaVA 第一阶段数据到底按哪种口径记为 <code>558K</code> 或 <code>595K</code>，本文没有解释。</li>
+<li>论文没有逐项写出每个 backbone 版本的全部隐藏维度，因此本报告中的部分张量表达采用了 <code>N_v x d_v</code>、<code>T x d_l</code> 这种更稳妥的符号表示。</li>
+</ul>
+<h2>13. 最终结论</h2>
+<p>如果把原始 LLaVA 看成“视觉指令微调范式的代表性起点”，那么 LLaVA-1.5 可以看成“把这条路线真正打磨成强 baseline 的版本”。</p>
+<p>它最重要的启发不是“结构越复杂越好”，而是：</p>
+<ul>
+<li><strong>把输出格式条件写清楚</strong></li>
+<li><strong>把多源数据混合做对</strong></li>
+<li><strong>让视觉分辨率足够支撑细节理解</strong></li>
+<li><strong>在简单 projector 上也能做出很强结果</strong></li>
+</ul>
+<p>从研究价值上看，这篇论文为后续很多开源多模态模型提供了一个非常清晰的参考系：<strong>在公开数据、有限算力和简单结构下，什么样的 recipe 才真正重要。</strong></p>
+<h2>14. 逐函数源码对照说明（附录）</h2>
+<p>说明：本节基于 <code>2026-04-08</code> 从官方 <code>LLaVA</code> 仓库 <code>main</code> 分支抓取的源码快照，主要覆盖：</p>
+<ul>
+<li><code>llava/train/train.py</code></li>
+<li><code>llava/mm_utils.py</code></li>
+<li><code>llava/model/llava_arch.py</code></li>
+</ul>
+<p>为便于后续逐段核对，本次抓取的源码快照也已保存在当前目录：</p>
+<ul>
+<li><code>source_snapshots/train.py</code></li>
+<li><code>source_snapshots/mm_utils.py</code></li>
+<li><code>source_snapshots/llava_arch.py</code></li>
+</ul>
+<p>由于 <code>main</code> 分支后续可能继续变化，下面的行号说明应理解为<strong>本次抓取快照对应的定位</strong>，而不是永久不变的行号。</p>
+<h3>14.1 <code>train.py</code>：训练入口、数据预处理与 dataloader</h3>
+<p><code>train.py</code> 是训练脚本的总入口。它负责三类事情：</p>
+<ul>
+<li>解析命令行参数</li>
+<li>把原始 JSON 样本变成 <code>input_ids / labels / images</code></li>
+<li>初始化模型、tokenizer、vision modules 和 trainer</li>
+</ul>
+<p>下面按函数顺序解释。</p>
+<h4>配置和保存辅助层</h4>
+<ul>
+<li>
+<p><code>rank0_print</code>（第 <code>44-46</code> 行）
+  作用很单纯：只在 <code>local_rank == 0</code> 时打印，避免多卡训练时每张卡都重复输出同一条日志。它不影响训练逻辑，只影响日志整洁度。</p>
+</li>
+<li>
+<p><code>ModelArguments</code>（第 <code>53-66</code> 行）
+  这是模型相关 CLI 参数的 dataclass。最关键字段包括：
+  <code>vision_tower</code>、<code>mm_projector_type</code>、<code>mm_vision_select_layer</code>、<code>mm_use_im_start_end</code>、<code>mm_use_im_patch_token</code>。
+  从论文角度看，它对应“视觉塔选什么、projector 怎么配、图像 token 采用什么注入方式”这几个设计变量。</p>
+</li>
+<li>
+<p><code>DataArguments</code>（第 <code>69-76</code> 行）
+  这是数据层配置。核心字段只有几个：
+  <code>data_path</code>、<code>image_folder</code>、<code>image_aspect_ratio</code>、<code>lazy_preprocess</code>。
+  其中 <code>image_aspect_ratio</code> 最关键，因为它决定图像走 <code>square / pad / anyres</code> 哪条预处理路径。</p>
+</li>
+<li>
+<p><code>TrainingArguments</code>（第 <code>79-112</code> 行）
+  在 Hugging Face <code>TrainingArguments</code> 的基础上扩展。和论文最相关的字段有：
+  <code>model_max_length</code>、<code>bits</code>、<code>lora_enable</code>、<code>mm_projector_lr</code>、<code>group_by_modality_length</code>。
+  其中 <code>group_by_modality_length</code> 对应论文附录里“每个 batch 只采样单一模态 conversation”的效率设计。</p>
+</li>
+<li>
+<p><code>maybe_zero_3</code>（第 <code>115-126</code> 行）
+  这是 DeepSpeed ZeRO-3 下参数保存的辅助函数。
+  它的意义是：如果参数被分片存储，保存前先把完整参数 gather 回来，再复制到 CPU。
+  这不是论文方法创新点，但它解释了为什么训练脚本能在 ZeRO 环境下只保存 projector 或 LoRA 权重。</p>
+</li>
+<li>
+<p><code>get_peft_state_maybe_zero_3</code>（第 <code>130-152</code> 行）
+  提取 LoRA 相关参数的 state dict。它按 <code>bias</code> 配置决定：
+  只取 LoRA、LoRA+全部 bias、还是 LoRA 对应 bias。</p>
+</li>
+<li>
+<p><code>get_peft_state_non_lora_maybe_zero_3</code>（第 <code>155-160</code> 行）
+  提取非 LoRA 参数。通常用于保存除 LoRA 之外仍可训练的参数。</p>
+</li>
+<li>
+<p><code>get_mm_adapter_state_maybe_zero_3</code>（第 <code>163-166</code> 行）
+  提取多模态 adapter 权重。对 LLaVA-1.5 第一阶段尤其关键，因为预训练脚本主要训练 <code>mm_projector</code>，保存时就靠这个函数抓取对应参数。</p>
+</li>
+<li>
+<p><code>find_all_linear_names</code>（第 <code>169-182</code> 行）
+  遍历模型，找出适合挂 LoRA 的线性层名字，同时显式跳过：
+  <code>mm_projector</code>、<code>vision_tower</code>、<code>vision_resampler</code>。
+  这说明脚本作者不希望默认把 LoRA 打到多模态桥接模块上，而是优先作用在语言主干线性层。</p>
+</li>
+<li>
+<p><code>safe_save_model_for_hf_trainer</code>（第 <code>185-221</code> 行）
+  这是训练结束后的统一保存出口。
+  它分三种情况：
+  1. 如果 <code>tune_mm_mlp_adapter=True</code>，只保存 <code>mm_projector</code>；
+  2. 如果 trainer 由 deepspeed 管理，调用 deepspeed 的保存逻辑；
+  3. 否则保存完整模型 state dict。
+  对理解 LLaVA-1.5 非常重要，因为它说明第一阶段 checkpoint 本质上就是一个 <code>mm_projector.bin</code>。</p>
+</li>
+<li>
+<p><code>smart_tokenizer_and_embedding_resize</code>（第 <code>224-246</code> 行）
+  当 tokenizer 新增特殊 token 时，它会：
+  1. 扩充 tokenizer 词表；
+  2. 调整模型 embedding matrix 大小；
+  3. 用原 embedding 平均值初始化新增 token 的输入/输出 embedding。
+  这避免新增特殊 token 时随机初始化过于不稳定。</p>
+</li>
+</ul>
+<h4>文本与标签预处理层</h4>
+<ul>
+<li>
+<p><code>_tokenize_fn</code>（第 <code>249-273</code> 行）
+  对一组字符串统一 tokenizer，返回：
+  <code>input_ids / labels / input_ids_lens / labels_lens</code>。
+  这里 <code>labels</code> 初始只是 <code>input_ids</code> 的别名，后面真正的“监督裁剪”要靠 mask 逻辑完成。</p>
+</li>
+<li>
+<p><code>_mask_targets</code>（第 <code>276-284</code> 行）
+  它接收：
+  <code>target</code>、每段 token 长度、speaker 列表。
+  核心规则是：human 说的话全部设成 <code>IGNORE_INDEX</code>，assistant 说的话保留。
+  这就是 LLaVA 指令微调里“只监督 assistant 输出”的基础机制。</p>
+</li>
+<li>
+<p><code>_add_speaker_and_signal</code>（第 <code>287-305</code> 行）
+  用早期模板风格给每轮对话加前缀：
+  <code>### Human:</code> / <code>### Assistant:</code>。
+  它属于旧模板兼容逻辑，对 <code>v1_5</code> 主路径不是核心，但能帮助理解旧版 prompt 是怎样串起来的。</p>
+</li>
+<li>
+<p><code>preprocess_multimodal</code>（第 <code>308-329</code> 行）
+  这是图文样本进入统一 prompt 之前的关键规范化步骤。
+  它做了三件事：
+  1. 找到 <code>sentence["value"]</code> 中的 <code>&lt;image&gt;</code>；
+  2. 强制把 <code>&lt;image&gt;</code> 移到文本第一行；
+  3. 如果开启 <code>mm_use_im_start_end</code>，就把 <code>&lt;image&gt;</code> 替换成 <code>&lt;im_start&gt;&lt;image&gt;&lt;im_end&gt;</code>。
+  这一步看似简单，但它决定了后面 tokenizer 看到的 prompt 结构是否稳定。</p>
+</li>
+<li>
+<p><code>preprocess_llama_2</code>（第 <code>332-411</code> 行）
+  当对话模板采用 <code>LLAMA_2</code> 风格时使用。
+  主要步骤是：
+  1. 用 <code>conversation_lib</code> 拼 prompt；
+  2. 如果有图像，调用 <code>tokenizer_image_token</code>；
+  3. <code>targets = input_ids.clone()</code>；
+  4. 按 <code>[/INST]</code> 分段，只保留 assistant 输出可计算 loss。
+  这说明 LLaVA 的监督逻辑和具体 conversation template 紧密相关。</p>
+</li>
+<li>
+<p><code>preprocess_v1</code>（第 <code>414-497</code> 行）
+  这是 <code>LLaVA-1.5</code> 主路径最关键的文本预处理函数。
+  它对应 <code>--version v1</code>，也就是 <code>conv_llava_v1</code>。
+  核心流程是：
+  1. 把多轮 <code>source</code> 转成 <code>USER / ASSISTANT</code> 交替的 prompt；
+  2. 如果含图像，用 <code>tokenizer_image_token</code> 生成 <code>input_ids</code>；
+  3. 克隆成 <code>targets</code>；
+  4. 用 <code>sep = conv.sep + conv.roles[1] + ": "</code> 找到 assistant 边界；
+  5. 把 system 和 user 片段全部设成 <code>IGNORE_INDEX</code>；
+  6. 遇到 tokenizer 长度和手工切分不一致时，整条样本直接置为全 <code>IGNORE_INDEX</code>，防止错误监督。
+  这就是 LLaVA-1.5 数据监督的主干函数。</p>
+</li>
+<li>
+<p><code>preprocess_mpt</code>（第 <code>500-585</code> 行）
+  和 <code>preprocess_v1</code> 类似，但为 <code>MPT</code> 对话模板服务。它对段落切分、token 长度修正的细节略有不同。</p>
+</li>
+<li>
+<p><code>preprocess_plain</code>（第 <code>588-607</code> 行）
+  这是第一阶段 pretrain 的关键函数。
+  它强制要求：
+  1. 每条样本只有两轮；
+  2. 第一轮必须含 <code>&lt;image&gt;</code>；
+  3. 输入串形如 <code>&lt;image&gt; + 文本目标 + sep</code>；
+  4. 图像占位前缀不参与 loss。
+  所以它本质上是在做“给图像条件下预测 caption”。</p>
+</li>
+<li>
+<p><code>preprocess</code>（第 <code>610-655</code> 行）
+  这是总分发函数。
+  它先看当前 conversation template：</p>
+</li>
+<li><code>PLAIN</code> -&gt; <code>preprocess_plain</code></li>
+<li><code>LLAMA_2</code> -&gt; <code>preprocess_llama_2</code></li>
+<li><code>v1*</code> -&gt; <code>preprocess_v1</code></li>
+<li><code>MPT</code> -&gt; <code>preprocess_mpt</code>
+  否则走更老的通用路径。
+  因而，这个函数决定了一条样本最终用哪一套“字符串模板 + label mask 规则”。</li>
+</ul>
+<h4>数据集与训练入口层</h4>
+<ul>
+<li><code>LazySupervisedDataset</code>（第 <code>658-739</code> 行）
+  这是训练样本的主要读取器。
+  它有几个值得单独解释的方法：</li>
+<li><code>__init__</code>：一次性读入 JSON；</li>
+<li><code>lengths</code>：估算样本长度，用于分组；</li>
+<li><code>modality_lengths</code>：文本样本取负长度，视觉样本取正长度，方便按模态分组；</li>
+<li><code>__getitem__</code>：真正核心逻辑。</li>
+</ul>
+<p><code>__getitem__</code> 逐步做的是：
+  1. 读第 <code>i</code> 条样本；
+  2. 如果有 <code>image</code>，从磁盘加载图像；
+  3. 如果 <code>image_aspect_ratio == 'pad'</code>，先 <code>expand2square</code> 再 <code>processor.preprocess</code>；
+  4. 对 conversation 做 <code>preprocess_multimodal</code>；
+  5. 再调用 <code>preprocess</code> 得到 <code>input_ids / labels</code>；
+  6. 最后把图像张量塞回 <code>data_dict['image']</code>。</p>
+<p>一个非常重要的细节是：
+  如果样本没有图像，但 <code>data_args.is_multimodal = True</code>，它会补一张全零图像张量。
+  这样做是为了让多模态模型的 batch 维持统一接口。</p>
+<ul>
+<li>
+<p><code>DataCollatorForSupervisedDataset</code>（第 <code>743-773</code> 行）
+  这是 batch 拼接器。
+  它会：
+  1. 对 <code>input_ids</code> 以 <code>pad_token_id</code> 右填充；
+  2. 对 <code>labels</code> 以 <code>IGNORE_INDEX</code> 填充；
+  3. 构造 <code>attention_mask</code>；
+  4. 如果图像张量形状一致，就 <code>torch.stack(images)</code>；
+  5. 否则保留 list 形式交给后续模型处理。</p>
+</li>
+<li>
+<p><code>make_supervised_data_module</code>（第 <code>776-785</code> 行）
+  只是一个薄封装，把 <code>LazySupervisedDataset</code> 和 <code>DataCollator</code> 打包成 trainer 需要的数据模块。</p>
+</li>
+<li>
+<p><code>train</code>（第 <code>788-998</code> 行，源码结尾）
+  这是整个 <code>train.py</code> 的真正入口。
+  从论文流程角度，最重要的步骤依次是：
+  1. 解析 CLI 参数；
+  2. 根据量化配置构建 <code>bnb_model_from_pretrained_args</code>；
+  3. 加载 <code>LlavaLlamaForCausalLM</code> 或其他兼容模型；
+  4. 关闭 <code>use_cache</code>，便于训练；
+  5. 如果启用量化或 LoRA，就做对应适配；
+  6. 加载 tokenizer，并按 <code>version</code> 设置 conversation template；
+  7. 如果有 <code>vision_tower</code>，调用 <code>initialize_vision_modules()</code>；
+  8. 把 <code>data_args.image_processor</code> 绑定到 vision tower 的处理器；
+  9. 如果 <code>tune_mm_mlp_adapter=True</code>，冻结全模型，只开放 <code>mm_projector</code> 参数；
+  10. 调用 <code>initialize_vision_tokenizer()</code> 注入视觉相关特殊 token；
+  11. 构建数据模块；
+  12. 构建 <code>LLaVATrainer</code>；
+  13. 调用 <code>trainer.train()</code>；
+  14. 最后按 LoRA / projector / 全量模型三种路径保存。</p>
+</li>
+</ul>
+<p>这里最值得注意的一点是：第一阶段脚本里由于 <code>tune_mm_mlp_adapter=True</code>，<code>train()</code> 会把除 <code>mm_projector</code> 之外的参数全部冻结，这就和论文“第一阶段主要学 projector”严格对齐了。</p>
+<h3>14.2 <code>mm_utils.py</code>：图像尺寸处理、图像 token 化与停止条件</h3>
+<p>如果说 <code>train.py</code> 负责“把样本组织起来”，那么 <code>mm_utils.py</code> 负责的是：</p>
+<ul>
+<li>图像尺寸怎么处理</li>
+<li><code>&lt;image&gt;</code> 怎么变成特殊 token 占位</li>
+<li>生成时怎样按关键词停止</li>
+</ul>
+<p>按函数逐个看。</p>
+<ul>
+<li><code>select_best_resolution</code>（第 <code>12-39</code> 行）
+  输入是原始图像大小和一组候选分辨率。
+  它计算两个量：</li>
+<li><code>effective_resolution</code>：缩放后真正保留下来的有效像素量</li>
+<li>
+<p><code>wasted_resolution</code>：目标画布里没被原图有效内容占满的浪费面积
+  选择规则是：
+  先最大化 <code>effective_resolution</code>，并列时再最小化 <code>wasted_resolution</code>。
+  这正是“尽量保细节，同时别浪费太多空白像素”的实现。</p>
+</li>
+<li>
+<p><code>resize_and_pad_image</code>（第 <code>42-74</code> 行）
+  先按长宽比算缩放后的 <code>new_width / new_height</code>，再在目标画布中央粘贴。
+  它是 <code>anyres</code> 路径里“先等比例 resize，再 pad 到目标尺寸”的具体实现。</p>
+</li>
+<li>
+<p><code>divide_to_patches</code>（第 <code>77-96</code> 行）
+  对已经 pad 好的大图按固定 <code>patch_size</code> 做规则切块。
+  注意这里的“patch”是图像级 tile，不是 ViT 内部的 <code>14 x 14</code> 小 patch。
+  例如传入 <code>224</code> 时，得到的是若干个 <code>224 x 224</code> 的 tile。</p>
+</li>
+<li>
+<p><code>get_anyres_image_grid_shape</code>（第 <code>99-116</code> 行）
+  先用 <code>select_best_resolution</code> 选目标分辨率，再除以 <code>patch_size</code>，得到 tile 网格是几列几行。
+  这个函数后面会在 <code>llava_arch.py</code> 里用于把 tile 特征重新还原成二维网格。</p>
+</li>
+<li>
+<p><code>process_anyres_image</code>（第 <code>119-145</code> 行）
+  这是 <code>anyres</code> 路径的主函数。
+  具体做法是：
+  1. 选最佳分辨率；
+  2. <code>resize_and_pad_image</code>；
+  3. 按 <code>processor.crop_size['height']</code> 切 tile；
+  4. 另外再构造一个 <code>processor.size['shortest_edge'] x processor.size['shortest_edge']</code> 的全局缩放图；
+  5. 把 <code>global view + local patches</code> 一起送进 <code>processor.preprocess</code>；
+  6. 最后 <code>torch.stack</code> 返回。</p>
+</li>
+</ul>
+<p>这里“把全局视图放在列表第一个位置”的设计，和论文里“额外拼接 global context”是同一思路。</p>
+<ul>
+<li>
+<p><code>load_image_from_base64</code>（第 <code>148-149</code> 行）
+  把 base64 编码字符串解码成 <code>PIL.Image</code>。主要服务于推理/服务端场景，不是训练核心。</p>
+</li>
+<li>
+<p><code>expand2square</code>（第 <code>152-163</code> 行）
+  这是基础版 <code>pad</code> 路径最关键的小函数之一。
+  它不改内容比例，只在短边方向补背景，使图像变成正方形。</p>
+</li>
+<li>
+<p><code>process_images</code>（第 <code>166-182</code> 行）
+  这是批量图像预处理总入口：</p>
+</li>
+<li>如果 <code>image_aspect_ratio == 'pad'</code>，就 <code>expand2square + preprocess</code></li>
+<li>如果是 <code>anyres</code>，就走 <code>process_anyres_image</code></li>
+<li>
+<p>否则直接让 <code>image_processor</code> 批量处理
+  最后如果所有图像张量形状一致，就堆成一个 batch tensor。</p>
+</li>
+<li>
+<p><code>tokenizer_image_token</code>（第 <code>185-204</code> 行）
+  这是 LLaVA 文本侧最关键的 utility 之一。
+  它不会把 <code>&lt;image&gt;</code> 直接展开成很多 token，而是：
+  1. 按 <code>&lt;image&gt;</code> split prompt；
+  2. 分段 tokenizer；
+  3. 在段与段之间插入 <code>IMAGE_TOKEN_INDEX</code>；
+  4. 如果要求，返回 <code>torch.Tensor</code>。</p>
+</li>
+</ul>
+<p>这意味着 <code>&lt;image&gt;</code> 在 token id 层只是一个逻辑占位，真正的视觉 embedding 注入要等到 <code>llava_arch.py</code>。</p>
+<ul>
+<li>
+<p><code>get_model_name_from_path</code>（第 <code>207-213</code> 行）
+  从模型路径里提取可显示名字。是小工具函数，不影响算法。</p>
+</li>
+<li>
+<p><code>KeywordsStoppingCriteria</code>（第 <code>215-247</code> 行）
+  这是生成阶段的停止条件类。
+  构造时把关键词转成 token id，推理时每一步检查：</p>
+</li>
+<li>token 后缀是否等于某个关键词 id 序列</li>
+<li>最近解码文本是否出现关键词
+  一旦匹配就停止生成。</li>
+</ul>
+<h3>14.3 <code>llava_arch.py</code>：视觉模块初始化与图文 embedding 融合</h3>
+<p><code>llava_arch.py</code> 是最接近“真正多模态拼接发生处”的文件。对理解 LLaVA-1.5 非常重要。</p>
+<h4><code>LlavaMetaModel</code> 类</h4>
+<ul>
+<li><code>LlavaMetaModel.__init__</code>（第 <code>31-41</code> 行）
+  如果 config 中已经声明了 <code>mm_vision_tower</code>，就在构造阶段预留：</li>
+<li><code>vision_tower</code></li>
+<li><code>mm_projector</code></li>
+<li>如果 patch merge 类型包含 <code>unpad</code>，再创建 <code>image_newline</code></li>
+</ul>
+<p>这里的 <code>image_newline</code> 就是后续 <code>HD/anyres</code> 路径里用来表达“行结束”的可学习 token。</p>
+<ul>
+<li>
+<p><code>get_vision_tower</code>（第 <code>43-47</code> 行）
+  从模型对象里取视觉塔实例。
+  它顺手兼容了 FSDP 下视觉塔被包成 list 的情况。</p>
+</li>
+<li>
+<p><code>initialize_vision_modules</code>（第 <code>49-97</code> 行）
+  这是视觉模块真正初始化的入口。
+  它做的事很多，但可以压成五步：
+  1. 从 <code>model_args</code> 取出 <code>vision_tower / mm_projector_type / mm_vision_select_layer</code> 等配置；
+  2. 构造或加载 vision tower；
+  3. 把 <code>config.mm_hidden_size</code> 设成视觉塔输出维度；
+  4. 构造 <code>mm_projector</code>；
+  5. 如果给了 <code>pretrain_mm_mlp_adapter</code>，就把第一阶段保存的 projector 权重加载进来。</p>
+</li>
+</ul>
+<p>也就是说，这个函数把“论文里说的 projector 接回到第二阶段”真正落实到了代码。</p>
+<h4><code>unpad_image</code> 函数</h4>
+<ul>
+<li><code>unpad_image</code>（第 <code>100-128</code> 行）
+  输入是已经 pad 并缩放后的特征图张量，以及原始图像大小。
+  它通过比较：</li>
+<li>原始长宽比</li>
+<li>当前特征图长宽比
+  反推出 pad 的部分应该裁掉多少，最终只保留真实内容对应的区域。</li>
+</ul>
+<p>这个函数是 <code>HD/anyres + unpad</code> 路径的重要组成部分，因为如果不去掉 padding，对应的视觉 token 其实是无效背景。</p>
+<h4><code>LlavaMetaForCausalLM</code> 类</h4>
+<ul>
+<li>
+<p><code>get_model</code>（第 <code>133-135</code> 行）
+  抽象方法，要求具体子类返回真正的语言模型主体。</p>
+</li>
+<li>
+<p><code>get_vision_tower</code>（第 <code>137-138</code> 行）
+  只是把调用转发到 <code>self.get_model()</code>，是一个薄封装。</p>
+</li>
+<li>
+<p><code>encode_images</code>（第 <code>140-143</code> 行）
+  这是最核心的视觉前处理入口之一：</p>
+</li>
+</ul>
+<pre><code class="language-python">vision_tower(images) -&gt; mm_projector(image_features)
+</code></pre>
+<p>所以从代码定义上，视觉编码并不是“只过 CLIP”，而是“CLIP 后立刻再过 projector”，返回的已经是 LLM hidden space 下的视觉 embedding。</p>
+<ul>
+<li><code>prepare_inputs_labels_for_multimodal</code>（第 <code>145-324</code> 行）
+  这是整个 LLaVA 多模态输入融合的核心函数，也是最值得逐段读的函数。</li>
+</ul>
+<p>它的主要逻辑可以分成 8 段：</p>
+<ol>
+<li>
+<p><strong>早退条件</strong>
+     如果没有 vision tower、没有 images，或者当前输入长度只有 1，就不做多模态处理，直接返回原输入。</p>
+</li>
+<li>
+<p><strong>图像编码</strong>
+     如果 <code>images</code> 是 list 或 <code>ndim == 5</code>，先把所有图像拼起来统一过 <code>encode_images()</code>，再按样本切回去。</p>
+</li>
+<li>
+<p><strong>patch merge</strong>
+     根据 <code>mm_patch_merge_type</code> 决定怎样把视觉特征整理成最终 token 序列。</p>
+<ul>
+<li><code>flat</code>：直接 flatten</li>
+<li><code>spatial*</code>：保留二维结构再做更复杂重排</li>
+</ul>
+</li>
+<li>
+<p><strong><code>anyres + spatial</code> 特殊处理</strong>
+     如果是多 tile 路径，会先把：</p>
+<ul>
+<li><code>base_image_feature</code> 作为全局视图</li>
+<li>剩余 tile feature reshape 成 <code>num_patch_height x num_patch_width x h x w x d</code>
+ 如果开启 <code>unpad</code>，则：</li>
+<li><code>unpad_image</code></li>
+<li>追加 <code>image_newline</code></li>
+<li>再 flatten 回 token 序列</li>
+</ul>
+</li>
+<li>
+<p><strong>准备 attention_mask / position_ids / labels</strong>
+     如果这些输入原本为 <code>None</code>，函数会补默认值，便于统一后续处理。</p>
+</li>
+<li>
+<p><strong>去掉 padding token</strong>
+     它先按 <code>attention_mask</code> 把输入序列里纯 padding 部分裁掉，只保留真实 token。</p>
+</li>
+<li>
+<p><strong>用视觉 embedding 替换 <code>IMAGE_TOKEN_INDEX</code></strong>
+     这是本函数最关键的步骤：</p>
+<ul>
+<li>先找出所有 <code>IMAGE_TOKEN_INDEX=-200</code></li>
+<li>把文本序列切成“图像前文本 / 图像后文本”片段</li>
+<li>对文本片段走 <code>embed_tokens</code></li>
+<li>在每个 <code>IMAGE_TOKEN_INDEX</code> 位置插入真实 <code>cur_image_features</code></li>
+<li>同时给这些视觉 token 创建一段全 <code>IGNORE_INDEX</code> 的 label</li>
+</ul>
+</li>
+<li>
+<p><strong>重新 pad 成 batch</strong>
+     因为不同样本替换后序列长度不同，所以最后还要重新做：</p>
+<ul>
+<li><code>new_input_embeds_padded</code></li>
+<li><code>new_labels_padded</code></li>
+<li><code>attention_mask</code></li>
+<li><code>position_ids</code></li>
+</ul>
+</li>
+</ol>
+<p>这一个函数，基本就把“为什么 <code>&lt;image&gt;</code> 在 tokenizer 阶段只是一个占位，但最后能变成整段视觉 embedding”彻底解释清楚了。</p>
+<ul>
+<li><code>initialize_vision_tokenizer</code>（第 <code>326-368</code> 行）
+  负责把视觉相关特殊 token 注册进 tokenizer。
+  逻辑分三种：</li>
+<li>如果 <code>mm_use_im_patch_token=True</code>，加入 <code>&lt;im_patch&gt;</code></li>
+<li>如果 <code>mm_use_im_start_end=True</code>，加入 <code>&lt;im_start&gt;</code> 和 <code>&lt;im_end&gt;</code></li>
+<li>如果还同时启用了 <code>tune_mm_mlp_adapter</code> 或加载了预训练 adapter，就同步处理这些新增 token 的 embedding</li>
+</ul>
+<p>这也解释了为什么在 LLaVA-1.5 官方脚本中把：
+  <code>mm_use_im_patch_token=False</code>
+  <code>mm_use_im_start_end=False</code>
+  写死后，基础路径下 tokenizer 层不会显式展开图像 patch token。</p>
+<h3>14.4 如果只记一条源码主线，应该记什么</h3>
+<p>如果把这三份源码压缩成一条“主线记忆”，我认为最值得记住的是：</p>
+<ol>
+<li><code>train.py</code> 负责把 JSON conversation 和图像样本整理成 <code>input_ids / labels / images</code></li>
+<li><code>mm_utils.py</code> 负责图像尺寸处理和 <code>&lt;image&gt;</code> 占位 token 化</li>
+<li><code>llava_arch.py</code> 负责把图像真正编码成视觉 embedding，并在 embedding 层替换掉 <code>IMAGE_TOKEN_INDEX</code></li>
+<li>最终 loss 只监督 assistant 文本输出，视觉 token 本身不参与预测</li>
+</ol>
+<p>这四步合起来，就是 LLaVA-1.5 的实现主骨架。</p>
+<h2>15. 补充参考来源</h2>
+<ul>
+<li>论文 PDF：<code>https://arxiv.org/pdf/2310.03744.pdf</code></li>
+<li>论文摘要页：<code>https://arxiv.org/abs/2310.03744</code></li>
+<li>官方仓库：<code>https://github.com/haotian-liu/LLaVA</code></li>
+<li>官方自定义数据格式文档：<code>https://github.com/haotian-liu/LLaVA/blob/main/docs/Finetune_Custom_Data.md</code></li>
+</ul>
+  </main>
+</body>
+</html>

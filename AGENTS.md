@@ -1,5 +1,11 @@
 # AGENTS.md
 
+## 环境约定
+- 在 `/home/cxy/codex/research-paper` 及其子目录中，后续涉及 Python 脚本执行、报告生成、Markdown 转 PDF、PDF 解析、图片处理等任务时，默认优先使用虚拟环境 `~/.venvs/codex-report`。
+- 该虚拟环境解释器路径为 `/home/cxy/.venvs/codex-report/bin/python`。
+- 如需安装额外 Python 依赖，优先使用 `uv pip install --python /home/cxy/.venvs/codex-report/bin/python ...` 安装到 `~/.venvs/codex-report`，不要默认安装到系统 Python。
+- 若该环境缺少完成任务所需的依赖，需要先说明，再补齐该环境。
+
 ## 文献阅读要求
 - 以文献内容为依据，优先提炼研究问题、核心思路、方法设计、实验结论和局限性。
 - 总结时尽量区分：作者明确说明的内容、基于文中信息的合理推断、目前无法确认的部分。
