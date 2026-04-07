@@ -92,7 +92,7 @@ Explain the challenge or bottleneck.
 ### 3.3 What is the key idea? / 核心思想是什么？
 Summarize the method in one paragraph first.
 
-先用一段话概括方法核心。
+先用一段话概括方法核心。后续按原理详细展开
 
 ### 3.4 How is the model built? / 模型怎么搭的？
 Describe:
@@ -116,12 +116,14 @@ State:
 - objective functions
 - supervision
 - data source
+- data process/ data struct
 - pretraining / finetuning relation
 
 说明：
 - 损失函数
 - 监督信号
 - 数据来源
+- 数据处理/ 数据格式
 - 预训练与微调关系
 
 ### 3.6 How is it evaluated? / 如何评测？
@@ -163,6 +165,13 @@ Be explicit and honest.
 Always state unresolved details.
 
 明确写出仍未被说明的问题。
+
+### 3.10 精读论文需要详细解释每一个阶段和模块
+想像解释给一个初学者
+详细举例解释模型处理流程中数据的流转的处理过程,写出数据源格式,处理方法,目标格式
+详细举例解释一些专业名词术语的内容
+详细举例解释模块的作用功能,数据如何处理,具体到详细原理,数据详细到张量的形式
+对于总结概括的创新功能点,除了总结,更要详细解释其所有原理,以及对比其他方法的改进,创新的数据提升
 
 ---
 
